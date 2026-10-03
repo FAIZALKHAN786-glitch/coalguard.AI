@@ -1,1 +1,1 @@
-# coalguard
+# coalguard.AI
