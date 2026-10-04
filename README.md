@@ -14,7 +14,7 @@ cp .env.example .env
 npm run dev
 ```
 
-Open `http://localhost:5173`. Vite binds to `0.0.0.0` and proxies `/api` to port 3001. Browser requests use same-origin URLs, including in Arena previews. Development defaults to demo mode; the demonstration workspace opens automatically unless you explicitly sign out.
+Open `http://localhost:5173`. Vite binds to `0.0.0.0` and proxies `/api` to port 3001. Browser requests use same-origin URLs, including in Arena previews. Development defaults to demo mode; the demonstration workspace opens automatically unless you explicitly sign out. For an HTTPS Arena preview embedded in the workspace, use `npm run dev:preview` instead; it enables the demo-only partitioned-session and cookie-free fallback needed when embedded browsers block cookies.
 
 ### Demo accounts
 
@@ -33,7 +33,7 @@ Sign out, then sign in with another account to evaluate permissions. Permissions
 
 If a session expires, CoalGuard now opens the sign-in screen instead of leaving a protected dashboard showing a 401 error. Sign-in also checks that the browser accepted the session before entering the workspace.
 
-For an HTTPS **demonstration** embedded in Arena, run the built app with `DEMO_MODE=true EMBEDDED_PREVIEW=true COOKIE_SECURE=true`. This uses a separate `__Host-` session cookie with `Secure`, `HttpOnly`, `SameSite=None`, and `Partitioned` attributes so the cookie is scoped to the embedding site's partition. The same-origin write checks remain enforced. Non-demo deployments refuse this option and retain normal SameSite=Lax cookies.
+For the development server in an HTTPS Arena preview, run `npm run dev:preview`; it turns on the embedded-preview mode needed for the browser's partitioned-cookie policy. For a built **demonstration** embedded in Arena, set `DEMO_MODE=true EMBEDDED_PREVIEW=true COOKIE_SECURE=true`. This uses a separate `__Host-` session cookie with `Secure`, `HttpOnly`, `SameSite=None`, and `Partitioned` attributes so the cookie is scoped to the embedding site's partition. The same-origin write checks remain enforced. Non-demo deployments refuse this option and retain normal SameSite=Lax cookies.
 
 If the browser or preview proxy drops cookies, embedded **demo mode only** can issue a short-lived (one-hour), server-validated session carried in an application-specific `X-CoalGuard-Session` header (so a preview gateway can reserve `Authorization`). The client keeps this session credential in the current tab's JavaScript memory—never in localStorage, sessionStorage, URLs, or service-worker caches. This is not an AI provider key. Reloading loses this fallback session. Role/mine checks, expiry, revocation, and same-origin write protection still apply. Ordinary production mode neither issues nor accepts this fallback. Because JavaScript can access a memory credential, use it only for demonstration data; do not attach production AI keys to a public demo.
 

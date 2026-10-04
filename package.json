@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "concurrently -k -n api,web \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:preview": "EMBEDDED_PREVIEW=true npm run dev",
     "dev:api": "node --watch server/index.js",
     "dev:web": "vite --host 0.0.0.0",
     "build": "vite build",
