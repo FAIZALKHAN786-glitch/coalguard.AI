@@ -45,6 +45,7 @@ export function Mines({
     `/dashboard?mine=${mine}`,
   );
   const [view, setView] = useState("map");
+  const [tileError, setTileError] = useState(false);
   if (loading) return <Loading />;
   if (error || !data)
     return (
@@ -100,8 +101,11 @@ export function Mines({
                 className="mine-map"
               >
                 <TileLayer
-                  attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-                  url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                  attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+                  errorTileUrl="/map-tile-fallback.svg"
+                  eventHandlers={{ tileerror: () => setTileError(true) }}
+                  referrerPolicy="strict-origin-when-cross-origin"
+                  url="https://tile.openstreetmap.org/{z}/{x}/{y}.png"
                 />
                 <MapBounds mines={data.mines} />
                 {data.mines.map((m) => (
@@ -137,7 +141,11 @@ export function Mines({
                   <span className="tiny-dot" /> Site locations · not survey
                   boundaries
                 </span>
-                <span>Map tiles require an internet connection</span>
+                <span role={tileError ? "status" : undefined}>
+                  {tileError
+                    ? "Map tiles could not be loaded. Site markers remain visible."
+                    : "Map tiles require an internet connection"}
+                </span>
               </div>
             </section>
           )}

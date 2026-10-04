@@ -56,6 +56,53 @@ try {
     fullPage: true,
   });
   console.log("✓ Desktop dashboard renders with live aggregates");
+  const failedTileRequests = [];
+  await page.route("https://tile.openstreetmap.org/**", async (route) => {
+    const requestHeaders = route.request().headers();
+    failedTileRequests.push({
+      url: route.request().url(),
+      referer: requestHeaders.referer,
+    });
+    await route.fulfill({
+      status: 403,
+      contentType: "text/plain",
+      body: "Access blocked",
+    });
+  });
+  await page.goto(url + "/#mines");
+  await expect(
+    page.getByRole("heading", { name: "Every site. In sight." }),
+  ).toBeVisible();
+  await expect(page.getByRole("status")).toContainText(
+    "Map tiles could not be loaded. Site markers remain visible.",
+  );
+  await expect(page.locator(".leaflet-control-attribution")).toContainText(
+    "OpenStreetMap contributors",
+  );
+  await expect.poll(() => failedTileRequests.length).toBeGreaterThan(0);
+  assert.equal(
+    new URL(failedTileRequests[0].url).origin,
+    "https://tile.openstreetmap.org",
+  );
+  assert.equal(
+    new URL(failedTileRequests[0].referer).origin,
+    new URL(url).origin,
+    "Cross-origin OSM requests should send only the CoalGuard origin",
+  );
+  await expect
+    .poll(() =>
+      page
+        .locator(".leaflet-tile-pane img.leaflet-tile")
+        .evaluateAll((images) =>
+          images.some(
+            (image) => new URL(image.src).pathname === "/map-tile-fallback.svg",
+          ),
+        ),
+    )
+    .toBe(true);
+  await page.unroute("https://tile.openstreetmap.org/**");
+  await page.goto(url + "/#dashboard");
+  console.log("✓ OSM attribution, referrer, and failed-tile fallback");
   const peer = await context.newPage();
   await peer.goto(url + "/#inspection");
   await expect(

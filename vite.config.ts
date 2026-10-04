@@ -15,7 +15,7 @@ export default defineConfig({
           .readFileSync("public/sw.js", "utf8")
           .replace(
             '"__BUILD_ASSETS__"',
-            ["/", "/favicon.svg", ...assets]
+            ["/", "/favicon.svg", "/map-tile-fallback.svg", ...assets]
               .map((a) => JSON.stringify(a))
               .join(","),
           )
