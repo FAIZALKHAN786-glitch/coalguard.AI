@@ -1,0 +1,15 @@
+node_modules/
+dist/
+data/*
+!data/.gitkeep
+.env
+.env.*
+!.env.example
+playwright-report/
+test-results/
+*.log
+
+# Defense in depth: never version secret mounts or key material.
+secrets/
+*.key
+*.pem
