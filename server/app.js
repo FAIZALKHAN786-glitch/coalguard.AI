@@ -396,7 +396,7 @@ export async function createApp({
           "SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=? AND s.expires>?",
         ).get(sessionKey(token), Date.now()));
     if (!u)
-      return      return res.status(401).json({ error: "Please sign in to continue" });
+      return res.status(401).json({ error: "Please sign in to continue" });
     req.user = safeUser(u);
     req.sessionTokenHash = sessionKey(token);
     if (!["GET", "HEAD", "OPTIONS"].includes(req.method))

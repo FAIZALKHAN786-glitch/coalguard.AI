@@ -26,14 +26,15 @@ before(() => {
 after(() => fs.rmSync(dir, { recursive: true, force: true }));
 
 const boot = async (name, options = {}) =>
-  await createApp({
+  createApp({
     database: path.join(dir, `${name}.sqlite`),
     uploads: path.join(dir, `${name}-uploads`),
     ...options,
   });
 
+
 test("a fresh production deployment starts, reports ready, and refuses demo access", async () => {
-  const instance = boot("production");
+  const instance = await boot("production");
   try {
     const { app, db } = instance;
     const health = await request(app).get("/api/health").expect(200);
@@ -97,23 +98,20 @@ test("a fresh production deployment starts, reports ready, and refuses demo acce
   }
 });
 
+
 test("production fails closed when mandatory configuration is missing", async () => {
   const password = process.env.ADMIN_PASSWORD;
   const email = process.env.ADMIN_EMAIL;
   delete process.env.ADMIN_PASSWORD;
   await assert.rejects(async () => await boot("missing-password"), /ADMIN_PASSWORD/);
   process.env.ADMIN_PASSWORD = "short";
-  try {
-    await assert.rejects(async () => await boot("short-password"), /ADMIN_PASSWORD/);
-  } finally {
-    process.env.ADMIN_PASSWORD = password;
-  }
+  await assert.rejects(async () => await boot("short-password"), /ADMIN_PASSWORD/);
+  process.env.ADMIN_PASSWORD = password;
   process.env.ADMIN_EMAIL = "not-an-email";
-  try {
-    await assert.rejects(async () => await boot("bad-email"), /ADMIN_EMAIL/);
-  } finally {
-    process.env.ADMIN_EMAIL = email;
-  }
+  await assert.rejects(async () => await boot("bad-email"), /ADMIN_EMAIL/);
+  process.env.ADMIN_EMAIL = email;
+  process.env.DEMO_MODE = demo;
+  delete process.env.ADMIN_PASSWORD;
 });
 
 test("an HTTPS origin without secure cookies is refused", async () => {
@@ -129,8 +127,16 @@ test("an HTTPS origin without secure cookies is refused", async () => {
   if (origin === undefined) delete process.env.APP_ORIGIN;
   else process.env.APP_ORIGIN = origin;
   delete process.env.COOKIE_SECURE;
-  secure.db.close();
+  secure.db.close();  process.env.DEMO_MODE = demo;
 });
+
+
+
+
+
+
+
+
 
 test("an existing demonstration database is refused in production", async () => {
   const database = path.join(dir, "demo-source.sqlite");
@@ -139,8 +145,16 @@ test("an existing demonstration database is refused in production", async () => 
   await assert.rejects(
     async () => await createApp({ database, demo: false }),
     /demonstration database/,
-  );
+  );  process.env.DEMO_MODE = demo;
 });
+
+
+
+
+
+
+
+
 
 test("demo mode cannot be entered by omitting configuration", async () => {
   // DEMO_MODE unset with NODE_ENV=production must resolve to production.
@@ -149,18 +163,6 @@ test("demo mode cannot be entered by omitting configuration", async () => {
   const instance = await createApp({
     database: path.join(dir, "implicit-production.sqlite"),
   });
-  try {
-    assert.equal(instance.db.prepare("SELECT count(*) n FROM users").get().n, 1);
-    assert.equal(
-      instance.db.prepare("SELECT count(*) n FROM mines").get().n,
-      0,
-      "no demonstration content may be seeded implicitly",
-    );
-    process.env.DEMO_MODE = demo;
-  } finally {
-    instance.db.close();
-  }
-});
   try {
     assert.equal(instance.db.prepare("SELECT count(*) n FROM users").get().n, 1);
     assert.equal(

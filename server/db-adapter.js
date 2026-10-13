@@ -282,22 +282,27 @@ export async function openDatabase(filename) {
 // Re-exports for import compatibility
 // ---------------------------------------------------------------------------
 
-export { uuid, now, schemaVersion };
+export { uuid, now } from "./db-pg.js";
+
+export const schemaVersion = () => {
+  // Delegates to db.js for the SQLite schema version
+  return import("./db.js").then(m => m.schemaVersion());
+};
 
 export const audit = async (db, user, action, entity, mineId, payload = {}) => {
   if (db._backend === "postgresql") {
     return pgAudit(db._pool, user, action, entity, mineId, payload);
   }
-  const dbModule = await sqliteModulePromise;
-  return Promise.resolve(dbModule.audit(db._db, user, action, entity, mineId, payload));
+  const { audit: sqliteAuditFn } = await sqliteModulePromise;
+  return Promise.resolve(sqliteAuditFn(db._db, user, action, entity, mineId, payload));
 };
 
 export const verifyAudit = async (db) => {
   if (db._backend === "postgresql") {
     return pgVerifyAudit(db._pool);
   }
-  const dbModule = await sqliteModulePromise;
-  return Promise.resolve(dbModule.verifyAudit(db._db));
+  const { verifyAudit: sqliteVerifyAuditFn } = await sqliteModulePromise;
+  return Promise.resolve(sqliteVerifyAuditFn(db._db));
 };
 
 export const transaction = async (db, fn) => db.transaction(fn);
