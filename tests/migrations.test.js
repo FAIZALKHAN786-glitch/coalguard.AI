@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import { openDatabase, audit, transaction, now } from "../server/db.js";
+import { openDatabase, audit, transaction, now, verifyAudit } from "../server/db.js";
 import { createApp } from "../server/app.js";
 
 // Schema created by the first CoalGuard release (no PRAGMA user_version, no
@@ -81,6 +81,87 @@ function indexNames(db) {
     .prepare("SELECT name FROM sqlite_master WHERE type='index'")
     .all()
     .map((row) => row.name);
+}
+
+
+function legacyDatabaseWithAudit(file, auditCount, recordCount) {
+  const db = new DatabaseSync(file);
+  db.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;");
+  db.exec(LEGACY_SCHEMA);
+  db.prepare("INSERT INTO users VALUES(?,?,?,?,?,?)").run(
+    "u-admin",
+    "Legacy Administrator",
+    "admin@coalguard.demo",
+    "$2b$12$legacyhashlegacyhashlegacyhashlegacyhashlegacyhashlegacyhash",
+    "admin",
+    "[]",
+  );
+  db.prepare("INSERT INTO mines VALUES(?,?,?,?,?,?,?)").run(
+    "gevra",
+    "Gevra Open Cast",
+    "SECL",
+    "Korba",
+    22.344,
+    82.564,
+    70,
+  );
+  if (recordCount) {
+    const insert = db.prepare(
+      "INSERT INTO records(id,kind,mine_id,title,category,status,priority,due_date,owner,notes,data,created_by,created_at,updated_at,version) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    );
+    for (let i = 0; i < recordCount; i++)
+      insert.run(
+        `legacy-rec-${i}`,
+        "compliance",
+        "gevra",
+        `Legacy obligation ${i}`,
+        "Safety",
+        "pending",
+        "high",
+        "2026-01-01",
+        "Legacy Owner",
+        "Evidence preserved across upgrade",
+        "{}",
+        "u-admin",
+        "2026-01-01T00:00:00.000Z",
+        "2026-01-01T00:00:00.000Z",
+        1,
+      );
+  }
+  if (auditCount) {
+    let prev = "GENESIS";
+    const nowStr = "2026-01-01T00:00:00.000Z";
+    const ins = db.prepare(
+      "INSERT INTO audit(actor,actor_name,action,entity,mine_id,payload,created_at,previous_hash,hash) VALUES(?,?,?,?,?,?,?,?,?)",
+    );
+    for (let i = 0; i < auditCount; i++) {
+      const entry = {
+        actor: "u-admin",
+        actor_name: "Legacy Administrator",
+        action: "checked",
+        entity: "mine",
+        mine_id: "gevra",
+        payload: "{}",
+        created_at: nowStr,
+        previous_hash: prev,
+      };
+      const hash = createHash("sha256").update(JSON.stringify(entry)).digest("hex");
+      ins.run(
+        entry.actor,
+        entry.actor_name,
+        entry.action,
+        entry.entity,
+        entry.mine_id,
+        entry.payload,
+        entry.created_at,
+        entry.previous_hash,
+        hash,
+      );
+      prev = hash;
+    }
+  }
+  db.close();
+  return file;
 }
 
 test("a pilot database from the previous release upgrades in place", () => {
@@ -182,6 +263,92 @@ test("an up-to-date database reopens idempotently", () => {
     assert.equal(second.prepare("SELECT entries FROM audit_anchor WHERE id=1").get().entries, 1);
   } finally {
     second.close();
+  }
+});
+
+test("migration initialises the audit anchor from an existing verified chain", () => {
+  // Reproduce the reported defect: a legacy database that already contains audit
+  // entries must upgrade so that the anchor reflects the existing chain, not a
+  // fresh (0, GENESIS) start. Otherwise the first new audit() would reset the
+  // count to 1 and verification would fail.
+  const file = path.join(dir, "legacy-with-audit.sqlite");
+  legacyDatabaseWithAudit(file, 5, 3);
+  const legacy = new DatabaseSync(file);
+  assert.equal(legacy.prepare("PRAGMA user_version").get().user_version, 0);
+  assert.equal(legacy.prepare("SELECT count(*) n FROM audit").get().n, 5);
+  legacy.close();
+
+  const db = openDatabase(file);
+  try {
+    assert.equal(db.prepare("PRAGMA user_version").get().user_version, 2);
+    // All legacy audit rows must survive the migration unchanged.
+    assert.equal(db.prepare("SELECT count(*) n FROM audit").get().n, 5);
+    assert.equal(db.prepare("SELECT count(*) n FROM records").get().n, 3);
+    // The anchor must reflect the existing chain head and length.
+    const anchor = db.prepare("SELECT * FROM audit_anchor WHERE id=1").get();
+    assert.ok(anchor, "an anchor row must exist after migration");
+    assert.equal(anchor.entries, 5, "anchor entries must equal existing audit count");
+    const lastHash = db.prepare("SELECT hash FROM audit ORDER BY id DESC LIMIT 1").get().hash;
+    assert.equal(anchor.head, lastHash, "anchor head must equal the last audit hash");
+    // Verification must pass immediately after migration.
+    assert.equal(verifyAudit(db).valid, true, "chain must verify immediately after migration");
+  } finally {
+    db.close();
+  }
+});
+
+test("an upgraded database with existing audit entries accepts new audit writes and verifies", () => {
+  const file = path.join(dir, "legacy-with-audit-append.sqlite");
+  legacyDatabaseWithAudit(file, 5, 3);
+  const db = openDatabase(file);
+  try {
+    assert.equal(db.prepare("PRAGMA user_version").get().user_version, 2);
+    assert.equal(db.prepare("SELECT count(*) n FROM audit").get().n, 5);
+    const anchor = db.prepare("SELECT * FROM audit_anchor WHERE id=1").get();
+    assert.equal(anchor.entries, 5);
+
+    // Append a new audit entry and verify the chain.
+    audit(db, { id: "u-admin", name: "Legacy Administrator" }, "checked", "mine", "gevra");
+    assert.equal(db.prepare("SELECT count(*) n FROM audit").get().n, 6);
+    const anchor2 = db.prepare("SELECT * FROM audit_anchor WHERE id=1").get();
+    assert.equal(anchor2.entries, 6);
+    const v = verifyAudit(db);
+    assert.equal(v.valid, true, "chain must verify after migration + append");
+    assert.equal(v.count, 6);
+    assert.equal(v.anchor, 6);
+  } finally {
+    db.close();
+  }
+});
+
+test("migration leaves no anchor when the legacy audit chain is broken", () => {
+  // A broken legacy chain must not be silently "fixed" by inventing an anchor:
+  // the absence of an anchor signals to an operator that the chain needs review.
+  const file = path.join(dir, "legacy-broken.sqlite");
+  const db = new DatabaseSync(file);
+  db.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;");
+  db.exec(LEGACY_SCHEMA);
+  db.prepare("INSERT INTO users VALUES(?,?,?,?,?,?)").run(
+    "u-admin", "Admin", "admin@coalguard.demo", "$2b$12$legacyhashlegacyhashlegacyhashlegacyhashlegacyhashlegacyhash", "admin", "[]",
+  );
+  db.prepare("INSERT INTO mines VALUES(?,?,?,?,?,?,?)").run("gevra", "Gevra", "SECL", "Korba", 22.344, 82.564, 70);
+  // First entry is valid.
+  const ins = db.prepare("INSERT INTO audit(actor,actor_name,action,entity,mine_id,payload,created_at,previous_hash,hash) VALUES(?,?,?,?,?,?,?,?,?)");
+  const firstEntry = { actor: "u-admin", actor_name: "Admin", action: "checked", entity: "mine", mine_id: "gevra", payload: "{}", created_at: "2026-01-01T00:00:00.000Z", previous_hash: "GENESIS" };
+  ins.run("u-admin", "Admin", "checked", "mine", "gevra", "{}", "2026-01-01T00:00:00.000Z", "GENESIS", createHash("sha256").update(JSON.stringify(firstEntry)).digest("hex"));
+  // Second entry has a tampered previous_hash.
+  ins.run("u-admin", "Admin", "checked", "mine", "gevra", "{}", "2026-01-01T00:00:01.000Z", "tampered", "badhash");
+  db.close();
+
+  const migrated = openDatabase(file);
+  try {
+    assert.equal(migrated.prepare("PRAGMA user_version").get().user_version, 2);
+    assert.equal(migrated.prepare("SELECT count(*) n FROM audit").get().n, 2);
+    const anchor = migrated.prepare("SELECT * FROM audit_anchor WHERE id=1").get();
+    assert.equal(anchor, undefined, "a broken legacy chain must leave no anchor");
+    assert.equal(verifyAudit(migrated).valid, false, "verified broken chain must be invalid");
+  } finally {
+    migrated.close();
   }
 });
 
