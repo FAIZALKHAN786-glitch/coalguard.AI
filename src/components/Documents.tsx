@@ -36,6 +36,7 @@ export function Documents({
   );
   const [query, setQuery] = useState(""),
     [selected, setSelected] = useState<Doc | null>(null),
+    [selectedText, setSelectedText] = useState<string | null>(null),
     [uploading, setUploading] = useState(false),
     [uploadMine, setUploadMine] = useState(
       mine === "all" ? mines[0]?.id || "" : mine,
@@ -67,6 +68,19 @@ export function Documents({
   const rows =
     data?.filter((d) => d.name.toLowerCase().includes(query.toLowerCase())) ||
     [];
+  // Extracted text is fetched per document instead of returning every stored
+  // extraction with the list.
+  async function openText(d: Doc) {
+    setSelected(d);
+    setSelectedText(null);
+    try {
+      const full = await api<Doc>(`/documents/${d.id}`);
+      setSelectedText(full.text || "");
+    } catch (error) {
+      setSelectedText("");
+      toast((error as Error).message);
+    }
+  }
   return (
     <div>
       <PageHeading
@@ -139,6 +153,9 @@ export function Documents({
             <h3>Document library</h3>
             <small className="muted">
               {data?.length || 0} documents · private, role-scoped storage
+              {data && data.length >= 200
+                ? " · showing the most recent 200, narrow your search"
+                : ""}
             </small>
           </div>
           <div className="input-search">
@@ -181,9 +198,11 @@ export function Documents({
                 <div className="doc-card-footer">
                   <button
                     className="text-button"
-                    onClick={() => setSelected(d)}
+                    disabled={!d.textLength}
+                    onClick={() => void openText(d)}
                   >
-                    Extracted text <ScanText size={14} />
+                    {d.textLength ? "Extracted text" : "No extracted text"}{" "}
+                    <ScanText size={14} />
                   </button>
                   <a
                     className="icon-button"
@@ -231,7 +250,10 @@ export function Documents({
         <Modal
           title={selected.name}
           subtitle={`Document ID: ${selected.id}`}
-          onClose={() => setSelected(null)}
+          onClose={() => {
+            setSelected(null);
+            setSelectedText(null);
+          }}
           wide
         >
           <div className="detail-content">
@@ -253,8 +275,10 @@ export function Documents({
                 <Copy size={14} /> Copy evidence ID
               </button>
             </div>
-            {selected.text ? (
-              <pre className="extracted-text">{selected.text}</pre>
+            {selectedText === null ? (
+              <Loading />
+            ) : selectedText ? (
+              <pre className="extracted-text">{selectedText}</pre>
             ) : (
               <Empty
                 title={

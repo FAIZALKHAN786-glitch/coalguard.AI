@@ -14,7 +14,8 @@
     "check": "tsc --noEmit",
     "test:browser": "npm run build && node tests/browser.mjs",
     "format": "prettier --write src server tests vite.config.ts",
-    "test:auth-browser": "npm run build && node tests/auth-browser.mjs"
+    "test:auth-browser": "npm run build && node tests/auth-browser.mjs",
+    "test:load": "node tests/load.mjs"
   },
   "dependencies": {
     "@fontsource-variable/dm-sans": "^5.3.0",

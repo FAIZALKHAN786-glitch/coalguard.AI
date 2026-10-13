@@ -45,8 +45,9 @@ export function Records({
   onOpen: (r: Entry) => void;
   toast: (s: string) => void;
 }) {
+  const RECORD_PAGE_LIMIT = 2000;
   const { data, error, loading, reload } = useData<Entry[]>(
-    `/records/${kind}?mine=${mine}`,
+    `/records/${kind}?mine=${mine}&limit=${RECORD_PAGE_LIMIT}`,
   );
   const [query, setQuery] = useState(""),
     [status, setStatus] = useState("all"),
@@ -295,6 +296,12 @@ export function Records({
             </button>
           </div>
         </div>
+        {data && data.length >= RECORD_PAGE_LIMIT && (
+          <p className="subtle-note" role="status">
+            Showing the {fmt(RECORD_PAGE_LIMIT)} most recent records. Narrow the
+            mine scope or filters to see older ones.
+          </p>
+        )}
       </section>
       {kind === "compliance" && (
         <div className="subtle-note">

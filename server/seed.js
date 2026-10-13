@@ -4,13 +4,25 @@ const day = (n) =>
   new Date(Date.now() + n * 86400000).toISOString().slice(0, 10);
 export function seed(db, demo) {
   if (db.prepare("SELECT count(*) n FROM users").get().n) return;
-  if (
-    !demo &&
-    (!process.env.ADMIN_PASSWORD || process.env.ADMIN_PASSWORD.length < 12)
-  )
-    throw new Error(
-      "Set ADMIN_PASSWORD (12+ characters) before starting with DEMO_MODE=false.",
-    );
+  if (!demo) {
+    if (
+      !process.env.ADMIN_PASSWORD ||
+      process.env.ADMIN_PASSWORD.length < 12
+    )
+      throw new Error(
+        "Set ADMIN_PASSWORD (12+ characters) before starting with DEMO_MODE=false.",
+      );
+    // A production bootstrap must name a real, validated mailbox the operator
+    // controls. A silent placeholder address would create an unrecoverable
+    // administrator account.
+    if (
+      !process.env.ADMIN_EMAIL ||
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(process.env.ADMIN_EMAIL)
+    )
+      throw new Error(
+        "Set ADMIN_EMAIL to a valid address before starting with DEMO_MODE=false.",
+      );
+  }
   transaction(db, () => {
     const users = demo
       ? [
@@ -51,7 +63,7 @@ export function seed(db, demo) {
           [
             uuid(),
             "Administrator",
-            process.env.ADMIN_EMAIL || "admin@coalguard.local",
+            process.env.ADMIN_EMAIL,
             process.env.ADMIN_PASSWORD,
             "admin",
             [],

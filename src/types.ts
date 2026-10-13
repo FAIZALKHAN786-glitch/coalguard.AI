@@ -87,7 +87,10 @@ export type Doc = {
   name: string;
   mime: string;
   size: number;
-  text: string;
+  /** Present on the authorized detail response only; lists omit it. */
+  text?: string;
+  /** Length of the stored extraction, safe to display in a list. */
+  textLength?: number;
   status: string;
   created_at: string;
 };
