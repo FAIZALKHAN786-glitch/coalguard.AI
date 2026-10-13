@@ -65,15 +65,23 @@ import { Documents } from "./components/Documents";
 import { Reports, Audit } from "./components/Reports";
 import { Settings, MineForm } from "./components/Settings";
 const navigation = [
-  { id: "dashboard", name: "Overview", icon: LayoutDashboard },
-  { id: "mines", name: "Mine portfolio", icon: Map },
-  { id: "compliance", name: "Compliance", icon: ShieldCheck },
-  { id: "inspection", name: "Inspections", icon: ClipboardCheck },
+  { id: "dashboard", name: "Executive overview", icon: LayoutDashboard },
+  { id: "mines", name: "Mine intelligence", icon: Map },
+  { id: "gis", name: "GIS intelligence", icon: MapPin },
+  { id: "compliance", name: "Compliance register", icon: ShieldCheck },
+  { id: "inspection", name: "Safety inspections", icon: ClipboardCheck },
   { id: "action", name: "Corrective actions", icon: TriangleAlert },
+  { id: "environment", name: "Environment", icon: Leaf },
+  { id: "operation", name: "Production", icon: Factory },
   { id: "contractor", name: "Contractors", icon: HardHat },
+  { id: "attendance", name: "Attendance", icon: Users },
+  { id: "grievance", name: "Grievances", icon: MessageSquare },
   { id: "field", name: "Field workspace", icon: MapPin },
-  { id: "intelligence", name: "Intelligence", icon: Sparkles },
-  { id: "documents", name: "Documents & OCR", icon: FolderOpen },
+  { id: "intelligence", name: "AI copilot", icon: Sparkles },
+  { id: "documents", name: "Documents & evidence", icon: FolderOpen },
+  { id: "reports", name: "Reports & analytics", icon: FileBarChart },
+  { id: "audit", name: "Audit & accountability", icon: Fingerprint },
+  { id: "settings", name: "Administration", icon: Settings2 },
 ];
 const recordNav = [
   { id: "reports", name: "Report builder", icon: FileBarChart },
@@ -515,7 +523,7 @@ function Workspace({
             <Building2 size={19} />
           </span>
           <span>
-            <strong>Coal India workspace</strong>
+            <strong>CoalGuard workspace</strong>
             <small>
               {demo ? "Demonstration portfolio" : "Governance workspace"}
             </small>
@@ -571,11 +579,11 @@ function Workspace({
             <span className="trust-icon">
               <ShieldCheck size={21} />
             </span>
-            <strong>Built on trust.</strong>
+            <strong>Accountable by design.</strong>
             <p>
-              Every action accounted for.
+              Every action traced.
               <br />
-              Every mine, connected.
+              Every decision, evidence-based.
             </p>
             <button onClick={() => navigate("audit")}>
               Explore audit trail <ArrowUpRight size={14} />
