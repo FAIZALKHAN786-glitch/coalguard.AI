@@ -41,6 +41,21 @@ execFileSync(
   ],
   { stdio: "ignore" },
 );
+// Headless Chromium needs a font configuration. Without one it aborts inside
+// Skia ("SkFontMgr_FontConfigInterface ... Not implemented") and Playwright
+// reports only "Target page, context or browser has been closed". Surface the
+// real prerequisite before launching.
+if (
+  process.platform === "linux" &&
+  !process.env.FONTCONFIG_FILE &&
+  !fs.existsSync("/etc/fonts/fonts.conf")
+)
+  console.warn(
+    "Warning: no fontconfig configuration found. Install fontconfig and a font package\n" +
+      "(Debian/Ubuntu: apt-get install -y fontconfig fonts-dejavu-core), or set FONTCONFIG_FILE\n" +
+      "to a valid fonts.conf. Headless Chromium can crash while rendering text without one.",
+  );
+
 const { app, db } = createApp({
   database: path.join(dir, "db.sqlite"),
   demo: true,

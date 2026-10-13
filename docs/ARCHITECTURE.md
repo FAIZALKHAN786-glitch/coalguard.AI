@@ -31,6 +31,7 @@ SQLite is a deliberate pilot choice: no additional database installation, persis
 - `idempotency`: unique user/key receipt. Offline replays return the initial field record without a second insert or audit event.
 - `documents`: private storage reference, verified media type, extracted text and processing status. Downloads repeat access checks.
 - `audit`: actor, action, entity, mine, payload, UTC timestamp, previous hash, own hash. Mutations and their audit entries commit atomically. Hash verification uses stable key ordering.
+- `audit_anchor`: the anchored entry count and head hash. Verification compares the walked chain against it, so removing the newest audit rows is detected rather than silently shortening a self-consistent chain.
 - `read_notifications`: user-scoped acknowledgments. Notification identity includes record, date, and status so material workflow changes can create a new reminder.
 
 Inputs and UI are not trusted authorization boundaries. The API checks both original and requested target mine on record changes. Evidence documents and corrective-action source records must belong to the same mine.
@@ -79,13 +80,13 @@ Write payload common fields: `mineId`, `title`, `category`, `status`, `priority`
 
 ## AI and privacy
 
-Only authorized records/documents enter context. Retrieval uses keyword scoring by default; optional cosine-similarity embeddings and reranking refine document selection. Retrieved content is explicitly treated as untrusted data in the system instruction. Models have no tool-execution or approval capability. This reduces action risk but does not eliminate prompt injection or hallucinations; review all output against source evidence.
+Only authorized records/documents enter context. Retrieval uses keyword scoring by default, with common function words ignored so a document cannot be cited merely because it shares "the" or "for" with the question; optional cosine-similarity embeddings and reranking refine document selection. Retrieved content is explicitly treated as untrusted data in the system instruction. Models have no tool-execution or approval capability. This reduces action risk but does not eliminate prompt injection or hallucinations; review all output against source evidence.
 
 The provider receives scoped context and its own authorization credential, not user session credentials. Provider keys are read from private runtime environment settings or mounted secret files; they are not sent to the browser. External providers are disabled in demo mode and require AI_ENABLED=true in a non-demo deployment. The audit stores query mode/source IDs, not the full user question. Avoid sending unnecessary worker PII; apply organizational data-retention and external-processor policies before connecting models.
 
 ## Deployment hardening checklist
 
-1. Fresh non-demo database, secure secrets, HTTPS, secure cookies, and trusted reverse proxy configuration. `trust proxy=1` assumes exactly one trusted ingress.
+1. Fresh non-demo database, secure secrets, HTTPS, secure cookies, and trusted reverse proxy configuration. `TRUST_PROXY` defaults to `loopback` and must name your real proxy addresses; see [OPERATIONS.md](OPERATIONS.md).
 2. Restrict embedding origins in Helmet/reverse-proxy CSP to your actual host; Arena preview origins are currently allowed for evaluation.
 3. Controlled onboarding and account recovery, MFA/SSO, password rotation and account disable flows, periodic access review.
 4. Encryption at rest, encrypted backups, malware scanning/quarantine, quotas, upload retention and safe purge policies.

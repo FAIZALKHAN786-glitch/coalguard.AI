@@ -12,6 +12,7 @@ import { randomBytes, createHash } from "node:crypto";
 import { z } from "zod";
 import {
   openDatabase,
+  schemaVersion,
   uuid,
   now,
   audit,
@@ -31,6 +32,62 @@ import { dashboard, notifications, insights } from "./analytics.js";
 import { aiStatus, chat, decision } from "./ai.js";
 import { aiPolicy } from "./ai-security.js";
 const fail = (status, message) => Object.assign(new Error(message), { status });
+
+// Bounded list endpoints. Analytical reads (dashboard, notifications, exports)
+// share a higher ceiling so no single request can pull an unbounded table.
+export const LIST_LIMIT_DEFAULT = 500;
+export const LIST_LIMIT_MAX = 2000;
+export const ANALYTICS_LIMIT_MAX = 20000;
+export const EXPORT_LIMIT_MAX = 10000;
+export const DOCUMENT_LIST_LIMIT = 200;
+// The reminder surface is a short list, not an export. Measured at 50,000
+// records the uncapped array reached 2 MB per poll.
+export const NOTIFICATION_LIMIT = 200;
+
+export function pageParams(
+  query = {},
+  fallback = LIST_LIMIT_DEFAULT,
+  max = LIST_LIMIT_MAX,
+) {
+  const parse = (value, def) => {
+    if (value === undefined || value === "") return def;
+    if (!/^\d{1,7}$/.test(String(value)))
+      throw fail(400, "limit and offset must be whole numbers");
+    return Number(value);
+  };
+  const limit = parse(query.limit, fallback);
+  const offset = parse(query.offset, 0);
+  if (limit < 1 || limit > max)
+    throw fail(400, `limit must be between 1 and ${max}`);
+  return { limit, offset };
+}
+
+// Trusted reverse-proxy configuration. The default trusts only a proxy on the
+// same host ("loopback"), so forwarded headers from any other source are
+// ignored. A service reachable directly from the internet therefore cannot be
+// made to believe a forged X-Forwarded-For, which is what rate-limit keys are
+// derived from when a request is unauthenticated.
+export function parseTrustProxy(value) {
+  const setting = String(value ?? "loopback").trim();
+  if (setting === "" || setting === "false") return false;
+  if (setting === "true")
+    throw new Error(
+      "TRUST_PROXY=true is refused: trusting every forwarder lets any client forge its own address. Trust a named range or an explicit hop count instead.",
+    );
+  if (/^[1-5]$/.test(setting)) return Number(setting);
+  if (["loopback", "linklocal", "uniquelocal"].includes(setting)) return setting;
+  const list = setting
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  const cidr = (entry) =>
+    /^(\d{1,3}\.){3}\d{1,3}\/\d{1,2}$/.test(entry) ||
+    /^[0-9a-fA-F:]+\/\d{1,3}$/.test(entry);
+  if (list.length && list.every(cidr)) return list;
+  throw new Error(
+    "TRUST_PROXY must be false, a hop count (1-5), loopback, linklocal, uniquelocal, or a comma-separated CIDR list of your proxy addresses.",
+  );
+}
 const safeUser = (u) => ({
   id: u.id,
   name: u.name,
@@ -46,6 +103,7 @@ export function createApp({
   uploads,
   embeddedPreview = process.env.EMBEDDED_PREVIEW === "true",
   publicOrigin = process.env.APP_ORIGIN,
+  trustProxy: trustProxySetting = process.env.TRUST_PROXY,
 } = {}) {
   if (embeddedPreview && !demo)
     throw new Error(
@@ -62,6 +120,38 @@ export function createApp({
     ...(embeddedPreview ? { partitioned: true } : {}),
     path: "/",
   };
+  // A demonstration deployment may be embedded in a preview workspace. A real
+  // deployment is framed by nothing except hosts the operator names explicitly.
+  const embeddingOrigins =
+    demo || embeddedPreview
+      ? [
+          "https://*.arena.ai",
+          "https://arena.ai",
+          "https://*.e2b.app",
+          ...(embeddedPreview ? ["https://*.arena.site"] : []),
+        ]
+      : [];
+  const frameAncestors = [
+    "'self'",
+    ...embeddingOrigins,
+    ...(process.env.FRAME_ANCESTORS || "")
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean),
+  ];
+  if (
+    !demo &&
+    !embeddedPreview &&
+    cookieOptions.secure !== true
+  ) {
+    if (trustedOrigin?.startsWith("https:"))
+      throw new Error(
+        "APP_ORIGIN is an HTTPS address but COOKIE_SECURE is not true. Sessions would be issued without the Secure attribute.",
+      );
+    console.warn(
+      "[coalguard] COOKIE_SECURE is not true: session cookies will not carry the Secure attribute. Terminate TLS at your reverse proxy and set COOKIE_SECURE=true before exposing this deployment.",
+    );
+  }
   const db = openDatabase(database);
   if (!demo && db.prepare("SELECT id FROM users WHERE id='u-admin'").get()) {
     db.close();
@@ -83,8 +173,12 @@ export function createApp({
   const app = express();
   const events = new EventEmitter();
   events.setMaxListeners(0);
-  app.set("trust proxy", 1);
+  const trustProxy = parseTrustProxy(trustProxySetting);
+  app.set("trust proxy", trustProxy);
   app.disable("x-powered-by");
+  console.info(
+    `[coalguard] TRUST_PROXY resolved to ${JSON.stringify(trustProxy)}; rate limits and client addresses follow this setting.`,
+  );
   app.use(
     helmet({
       contentSecurityPolicy: {
@@ -100,13 +194,7 @@ export function createApp({
           ],
           connectSrc: ["'self'"],
           fontSrc: ["'self'", "data:"],
-          frameAncestors: [
-            "'self'",
-            "https://*.arena.ai",
-            "https://arena.ai",
-            "https://*.e2b.app",
-            ...(embeddedPreview ? ["https://*.arena.site"] : []),
-          ],
+          frameAncestors,
         },
       },
       referrerPolicy: { policy: "strict-origin-when-cross-origin" },
@@ -181,7 +269,52 @@ export function createApp({
     }
     next();
   });
+  // Two layers: a per-account (or per-address when signed out) fair-use limit,
+  // and a process-wide ceiling that keeps one caller from consuming the whole
+  // service. Neither replaces a provider-side spend cap or an edge limiter.
+  const identity = (req) =>
+    createHash("sha256")
+      .update(
+        req.cookies?.[cookieName] ||
+          req.get("authorization") ||
+          req.get("x-coalguard-session") ||
+          req.ip ||
+          "anonymous",
+      )
+      .digest("hex");
+  const apiLimit = rateLimit({
+    windowMs: 60000,
+    limit: 600,
+    standardHeaders: "draft-7",
+    legacyHeaders: false,
+    keyGenerator: identity,
+    skip: (req) => ["/health", "/ready", "/events"].includes(req.path),
+    message: { error: "Too many requests. Please slow down and try again." },
+  });
+  const globalLimit = rateLimit({
+    windowMs: 60000,
+    limit: 1200,
+    standardHeaders: "draft-7",
+    legacyHeaders: false,
+    keyGenerator: () => "all-requests",
+    skip: (req) => ["/health", "/ready", "/events"].includes(req.path),
+    message: { error: "The service is busy. Please retry in a moment." },
+  });
+  app.use("/api", apiLimit, globalLimit);
   app.get("/api/health", (req, res) => res.json({ ok: true }));
+  app.get("/api/ready", (req, res) => {
+    try {
+      const actual = db.prepare("PRAGMA user_version").get().user_version;
+      const expected = schemaVersion();
+      if (actual !== expected)
+        throw new Error(`schema version ${actual} is not ${expected}`);
+      db.prepare("SELECT 1 AS ok").get();
+      res.json({ ready: true, schemaVersion: actual });
+    } catch {
+      // Readiness must not disclose paths, credentials or driver detail.
+      res.status(503).json({ ready: false });
+    }
+  });
   app.get("/api/config", (req, res) =>
     res.json({ demo, embeddedPreview, version: "1.0.0" }),
   );
@@ -276,8 +409,14 @@ export function createApp({
       });
     next();
   });
+  // Portfolio visibility is a property of the role, never of an empty
+  // assignment list. A field or officer account whose mine list is empty must
+  // not silently gain access to every site.
+  const portfolioRoles = ["admin", "regulator"];
   const mineAccess = (u, id) =>
-    u.role === "admin" || u.mines.length === 0 || u.mines.includes(id);
+    portfolioRoles.includes(u.role)
+      ? u.mines.length === 0 || u.mines.includes(id)
+      : u.mines.includes(id);
   function requireMine(u, id) {
     if (!db.prepare("SELECT id FROM mines WHERE id=?").get(id))
       throw fail(404, "Mine not found");
@@ -288,23 +427,71 @@ export function createApp({
     if (!roles.includes(u.role))
       throw fail(403, "Your role does not permit this action");
   }
-  function scopedMines(u, filter) {
-    if (filter && filter !== "all") requireMine(u, filter);
+  const placeholders = (n) => Array(n).fill("?").join(",");
+  function scopedMineIds(u, filter) {
+    if (filter && filter !== "all") {
+      requireMine(u, filter);
+      return [filter];
+    }
     return db
-      .prepare("SELECT * FROM mines ORDER BY name")
+      .prepare("SELECT id FROM mines ORDER BY id")
       .all()
-      .filter(
-        (m) =>
-          mineAccess(u, m.id) &&
-          (!filter || filter === "all" || filter === m.id),
-      );
+      .map((m) => m.id)
+      .filter((id) => mineAccess(u, id));
   }
-  function scopedRecords(u, filter) {
-    const ids = new Set(scopedMines(u, filter).map((m) => m.id));
+  function scopedMines(u, filter) {
+    const ids = scopedMineIds(u, filter);
+    if (!ids.length) return [];
     return db
-      .prepare("SELECT * FROM records ORDER BY created_at DESC,rowid DESC")
-      .all()
-      .filter((r) => ids.has(r.mine_id))
+      .prepare(
+        `SELECT * FROM mines WHERE id IN (${placeholders(ids.length)}) ORDER BY name`,
+      )
+      .all(...ids);
+  }
+  // Mine scope, record kind, status, search text and ordering are pushed into
+  // SQL with a bound row limit: a request never reads a whole table to filter
+  // it in memory, and the result size is deterministic.
+  function recordFilter(u, filter, { kind, status, q } = {}) {
+    const ids = scopedMineIds(u, filter);
+    if (!ids.length) return null;
+    const where = [`mine_id IN (${placeholders(ids.length)})`];
+    const params = [...ids];
+    if (kind) {
+      where.push("kind=?");
+      params.push(kind);
+    }
+    if (status) {
+      where.push("status=?");
+      params.push(status);
+    }
+    if (q) {
+      where.push(
+        "instr(lower(title||' '||owner||' '||category||' '||notes),?)>0",
+      );
+      params.push(String(q).toLowerCase());
+    }
+    return { clause: where.join(" AND "), params };
+  }
+  function countRecords(u, filter, options = {}) {
+    const built = recordFilter(u, filter, options);
+    if (!built) return 0;
+    return db
+      .prepare(`SELECT count(*) n FROM records WHERE ${built.clause}`)
+      .get(...built.params).n;
+  }
+  function scopedRecords(u, filter, options = {}) {
+    const built = recordFilter(u, filter, options);
+    if (!built) return [];
+    const limit = Math.min(
+      Number(options.limit) || ANALYTICS_LIMIT_MAX,
+      ANALYTICS_LIMIT_MAX,
+    );
+    const offset = Math.max(Number(options.offset) || 0, 0);
+    return db
+      .prepare(
+        `SELECT * FROM records WHERE ${built.clause} ORDER BY created_at DESC,rowid DESC LIMIT ? OFFSET ?`,
+      )
+      .all(...built.params, limit, offset)
       .map(record);
   }
   function canWrite(u, kind) {
@@ -348,7 +535,16 @@ export function createApp({
     res.json({ ok: true });
   });
   app.use("/api", (req, res, next) => {
-    for (const key of ["mine", "q", "status", "kind", "from", "to"])
+    for (const key of [
+      "mine",
+      "q",
+      "status",
+      "kind",
+      "from",
+      "to",
+      "limit",
+      "offset",
+    ])
       if (
         req.query[key] !== undefined &&
         (typeof req.query[key] !== "string" || req.query[key].length > 500)
@@ -377,26 +573,35 @@ export function createApp({
   });
   app.get("/api/dashboard", (req, res) => {
     const mines = scopedMines(req.user, req.query.mine);
+    const rows = scopedRecords(req.user, req.query.mine);
+    // The analytical scan is capped; the flag keeps truncation visible instead
+    // of silently reporting partial aggregates.
+    const total = countRecords(req.user, req.query.mine);
     res.json({
-      ...dashboard(scopedRecords(req.user, req.query.mine), mines),
+      ...dashboard(rows, mines),
       updatedAt: now(),
+      scannedRecords: rows.length,
+      totalRecords: total,
+      truncated: total > rows.length,
     });
   });
   app.get("/api/records/:kind", (req, res) => {
     if (!statuses[req.params.kind]) throw fail(404, "Unknown record type");
-    let rows = scopedRecords(req.user, req.query.mine).filter(
-      (r) => r.kind === req.params.kind,
-    );
-    if (req.query.status)
-      rows = rows.filter((r) => r.status === req.query.status);
-    if (req.query.q) {
-      const q = String(req.query.q).toLowerCase();
-      rows = rows.filter((r) =>
-        (r.title + " " + r.owner + " " + r.category + " " + r.notes)
-          .toLowerCase()
-          .includes(q),
-      );
-    }
+    const kind = req.params.kind;
+    if (req.query.status && !statuses[kind].includes(req.query.status))
+      throw fail(400, "Unknown status filter for this record type");
+    const { limit, offset } = pageParams(req.query);
+    const options = {
+      kind,
+      status: req.query.status,
+      q: req.query.q,
+      limit,
+      offset,
+    };
+    const total = countRecords(req.user, req.query.mine, options);
+    const rows = scopedRecords(req.user, req.query.mine, options);
+    res.set("X-Total-Count", String(total));
+    res.set("X-Result-Limit", String(limit));
     res.json(rows);
   });
   app.post("/api/records/:kind", (req, res) => {
@@ -429,22 +634,23 @@ export function createApp({
     }
     const key = req.get("Idempotency-Key");
     if (key && key.length > 100) throw fail(400, "Idempotency key is too long");
-    if (key) {
-      const old = db
-        .prepare("SELECT record_id FROM idempotency WHERE user_id=? AND key=?")
-        .get(req.user.id, key);
-      if (old) {
-        const existing = record(
-          db.prepare("SELECT * FROM records WHERE id=?").get(old.record_id),
-        );
-        if (!existing)
-          throw fail(409, "Previously submitted record was removed");
-        return res.json(existing);
-      }
-    }
     const id = uuid(),
       time = now();
+    let replayId = null;
     transaction(db, () => {
+      // The receipt is claimed inside the same transaction as the insert, so
+      // BEGIN IMMEDIATE serializes simultaneous replays of one offline report:
+      // the second request returns the first record and writes no second audit
+      // entry.
+      if (key) {
+        const existing = db
+          .prepare("SELECT record_id FROM idempotency WHERE user_id=? AND key=?")
+          .get(req.user.id, key);
+        if (existing) {
+          replayId = existing.record_id;
+          return;
+        }
+      }
       db.prepare(
         "INSERT INTO records(id,kind,mine_id,title,category,status,priority,due_date,owner,notes,data,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
       ).run(
@@ -471,6 +677,14 @@ export function createApp({
           id,
         );
     });
+    if (replayId) {
+      const existing = record(
+        db.prepare("SELECT * FROM records WHERE id=?").get(replayId),
+      );
+      if (!existing)
+        throw fail(409, "Previously submitted record was removed");
+      return res.json(existing);
+    }
     res
       .status(201)
       .json(record(db.prepare("SELECT * FROM records WHERE id=?").get(id)));
@@ -566,11 +780,12 @@ export function createApp({
         .all(req.user.id)
         .map((r) => r.notification_id),
     );
+    const all = notifications(scopedRecords(req.user, req.query.mine));
+    // Already ordered by due date, so truncation keeps the most urgent items.
+    const visible = all.slice(0, NOTIFICATION_LIMIT);
+    res.set("X-Total-Count", String(all.length));
     res.json(
-      notifications(scopedRecords(req.user, req.query.mine)).map((n) => ({
-        ...n,
-        read: read.has(n.id),
-      })),
+      visible.map((n) => ({ ...n, read: read.has(n.id) })),
     );
   });
   app.post("/api/notifications/read", (req, res) => {
@@ -578,7 +793,7 @@ export function createApp({
       .object({ ids: z.array(z.string().max(200)).max(2000) })
       .parse(req.body);
     const allowed = new Set(
-      notifications(scopedRecords(req.user)).map((n) => n.id),
+      notifications(scopedRecords(req.user, "all")).map((n) => n.id),
     );
     transaction(db, () => {
       for (const id of ids)
@@ -590,17 +805,39 @@ export function createApp({
     res.json({ ok: true });
   });
   app.get("/api/audit", (req, res) => {
-    const allowed = new Set(
-      scopedMines(req.user, req.query.mine).map((m) => m.id),
+    const { limit, offset } = pageParams(req.query, 500, LIST_LIMIT_MAX);
+    const ids = scopedMineIds(req.user, req.query.mine);
+    const where = [];
+    const params = [];
+    if (req.user.role === "admin") {
+      // Portfolio administrators also see workspace-level (mine-less) entries.
+      if (ids.length) {
+        where.push(`(mine_id IS NULL OR mine_id IN (${placeholders(ids.length)}))`);
+        params.push(...ids);
+      } else {
+        where.push("mine_id IS NULL");
+      }
+    } else if (ids.length) {
+      where.push(`mine_id IN (${placeholders(ids.length)})`);
+      params.push(...ids);
+    } else {
+      res.set("X-Total-Count", "0");
+      return res.json([]);
+    }
+    const clause = where.join(" AND ");
+    res.set(
+      "X-Total-Count",
+      String(
+        db.prepare(`SELECT count(*) n FROM audit WHERE ${clause}`).get(...params)
+          .n,
+      ),
     );
     res.json(
       db
-        .prepare("SELECT * FROM audit ORDER BY id DESC")
-        .all()
-        .filter((r) =>
-          r.mine_id ? allowed.has(r.mine_id) : req.user.role === "admin",
+        .prepare(
+          `SELECT * FROM audit WHERE ${clause} ORDER BY id DESC LIMIT ? OFFSET ?`,
         )
-        .slice(0, 500),
+        .all(...params, limit, offset),
     );
   });
   app.get("/api/audit/verify", (req, res) => {
@@ -684,17 +921,71 @@ export function createApp({
     const { storage_name, created_by, ...safe } = d;
     return safe;
   };
+  // Extracted text reaches 250 kB per document, so the list returns metadata
+  // only and never ships the private extraction of every stored file at once.
+  const listDoc = (d) => {
+    const { text, storage_name, created_by, ...safe } = d;
+    return { ...safe, textLength: text.length };
+  };
   app.get("/api/documents", (req, res) => {
-    const ids = new Set(scopedMines(req.user, req.query.mine).map((m) => m.id));
+    const ids = scopedMineIds(req.user, req.query.mine);
+    const { limit, offset } = pageParams(
+      req.query,
+      DOCUMENT_LIST_LIMIT,
+      LIST_LIMIT_MAX,
+    );
+    if (!ids.length) {
+      res.set("X-Total-Count", "0");
+      return res.json([]);
+    }
+    const clause = `mine_id IN (${placeholders(ids.length)})`;
+    res.set(
+      "X-Total-Count",
+      String(
+        db
+          .prepare(`SELECT count(*) n FROM documents WHERE ${clause}`)
+          .get(...ids).n,
+      ),
+    );
     res.json(
       db
-        .prepare("SELECT * FROM documents ORDER BY created_at DESC")
-        .all()
-        .filter((d) => ids.has(d.mine_id))
-        .map(publicDoc),
+        .prepare(
+          `SELECT * FROM documents WHERE ${clause} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+        )
+        .all(...ids, limit, offset)
+        .map(listDoc),
     );
   });
+  app.get("/api/documents/:id", (req, res) => {
+    const d = db
+      .prepare("SELECT * FROM documents WHERE id=?")
+      .get(req.params.id);
+    if (!d) throw fail(404, "Document not found");
+    requireMine(req.user, d.mine_id);
+    res.json(publicDoc(d));
+  });
   let ocrTail = Promise.resolve();
+  const MAX_PENDING_EXTRACTIONS = Number(
+    process.env.MAX_PENDING_EXTRACTIONS || 8,
+  );
+  let pendingExtractions = 0;
+  function requireExtractionCapacity() {
+    if (pendingExtractions >= MAX_PENDING_EXTRACTIONS)
+      throw fail(
+        503,
+        "Document processing is at capacity. Try again in a few minutes.",
+      );
+  }
+  function scheduleExtraction(id, buffer, mime) {
+    pendingExtractions += 1;
+    void extract(id, buffer, mime)
+      .catch((error) =>
+        console.error("Document extraction failed:", error.message),
+      )
+      .finally(() => {
+        pendingExtractions -= 1;
+      });
+  }
   async function extract(id, buffer, mime) {
     let text = "",
       status = "ready";
@@ -784,6 +1075,9 @@ export function createApp({
           400,
           "Supported files: PDF, PNG, JPEG, and plain text (10 MB maximum)",
         );
+      // Check capacity before storing anything, so a rejected upload leaves no
+      // document stuck in "processing".
+      requireExtractionCapacity();
       const id = uuid(),
         storageName = id + ".bin";
       const name = path.basename(f.originalname).slice(0, 200);
@@ -812,9 +1106,7 @@ export function createApp({
         fs.unlinkSync(path.join(uploadDir, storageName));
         throw e;
       }
-      void extract(id, b, mime).catch((e) =>
-        console.error("Document extraction failed:", e.message),
-      );
+      scheduleExtraction(id, b, mime);
       res
         .status(201)
         .json(
@@ -840,12 +1132,13 @@ export function createApp({
     requireMine(req.user, d.mine_id);
     if (d.status === "processing")
       throw fail(409, "Extraction is already running");
+    requireExtractionCapacity();
     db.prepare("UPDATE documents SET status='processing' WHERE id=?").run(d.id);
-    void extract(
+    scheduleExtraction(
       d.id,
       fs.readFileSync(path.join(uploadDir, d.storage_name)),
       d.mime,
-    ).catch((e) => console.error(e.message));
+    );
     audit(db, req.user, "retried_extraction", `document:${d.id}`, d.mine_id);
     res.json({ ok: true });
   });
@@ -857,6 +1150,15 @@ export function createApp({
     legacyHeaders: false,
     message: { error: "Please wait a minute before another AI request." },
   });
+  const MAX_CONCURRENT_AI = Number(process.env.MAX_CONCURRENT_AI || 4);
+  let inFlightAi = 0;
+  function requireAiCapacity() {
+    if (inFlightAi >= MAX_CONCURRENT_AI)
+      throw fail(
+        503,
+        "The assistant is handling other requests. Please retry shortly.",
+      );
+  }
   app.post("/api/ai/chat", aiLimit, async (req, res) => {
     const { question, mineId } = z
       .object({
@@ -864,13 +1166,18 @@ export function createApp({
         mineId: z.string().optional(),
       })
       .parse(req.body);
-    const rows = scopedRecords(req.user, mineId),
+    const rows = scopedRecords(req.user, mineId, { limit: 500 }),
       mines = scopedMines(req.user, mineId),
       ids = new Set(mines.map((m) => m.id));
-    const docs = db
-      .prepare("SELECT * FROM documents WHERE status='ready' AND text<>''")
-      .all()
-      .filter((d) => ids.has(d.mine_id));
+    const docs = ids.size
+      ? db
+          .prepare(
+            `SELECT * FROM documents WHERE status='ready' AND text<>'' AND mine_id IN (${placeholders(ids.size)}) ORDER BY created_at DESC LIMIT 200`,
+          )
+          .all(...ids)
+      : [];
+    requireAiCapacity();
+    inFlightAi += 1;
     let response;
     try {
       response = await chat(
@@ -890,6 +1197,8 @@ export function createApp({
         502,
         "The AI provider is unavailable or returned an invalid response. Your records are unaffected.",
       );
+    } finally {
+      inFlightAi -= 1;
     }
     audit(
       db,
@@ -909,6 +1218,8 @@ export function createApp({
       scopedRecords(req.user, filter),
       scopedMines(req.user, filter),
     );
+    requireAiCapacity();
+    inFlightAi += 1;
     let response;
     try {
       response = await decision(signals, aiPolicy(demo));
@@ -920,6 +1231,8 @@ export function createApp({
         502,
         "The decision model is unavailable. Rule-based signals remain accessible.",
       );
+    } finally {
+      inFlightAi -= 1;
     }
     audit(
       db,
@@ -936,9 +1249,10 @@ export function createApp({
       throw fail(400, "Choose CSV or PDF");
     const kind = req.query.kind || "compliance";
     if (!statuses[kind]) throw fail(400, "Unknown report type");
-    let rows = scopedRecords(req.user, req.query.mine).filter(
-      (r) => r.kind === kind,
-    );
+    let rows = scopedRecords(req.user, req.query.mine, {
+      kind,
+      limit: EXPORT_LIMIT_MAX + 1,
+    });
     const from = req.query.from,
       to = req.query.to;
     for (const d of [from, to])
@@ -952,6 +1266,11 @@ export function createApp({
       );
     if (to)
       rows = rows.filter((r) => (r.dueDate || r.createdAt.slice(0, 10)) <= to);
+    if (rows.length > EXPORT_LIMIT_MAX)
+      throw fail(
+        413,
+        `Exports are limited to ${EXPORT_LIMIT_MAX} rows. Narrow the mine, date or type filters.`,
+      );
     const mines = scopedMines(req.user, req.query.mine);
     const mineName = (id) => mines.find((m) => m.id === id)?.name || id;
     audit(

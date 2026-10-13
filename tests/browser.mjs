@@ -22,6 +22,21 @@ if (process.platform === "linux") {
   );
   execFileSync("tar", ["xf", archive, "-C", libraryDir]);
 }
+// Headless Chromium needs a font configuration. Without one it aborts inside
+// Skia ("SkFontMgr_FontConfigInterface ... Not implemented") and Playwright
+// reports only "Target page, context or browser has been closed". Surface the
+// real prerequisite before launching.
+if (
+  process.platform === "linux" &&
+  !process.env.FONTCONFIG_FILE &&
+  !fs.existsSync("/etc/fonts/fonts.conf")
+)
+  console.warn(
+    "Warning: no fontconfig configuration found. Install fontconfig and a font package\n" +
+      "(Debian/Ubuntu: apt-get install -y fontconfig fonts-dejavu-core), or set FONTCONFIG_FILE\n" +
+      "to a valid fonts.conf. Headless Chromium can crash while rendering text without one.",
+  );
+
 const { app, db } = createApp({
   database: path.join(dir, "test.sqlite"),
   demo: true,
@@ -103,11 +118,31 @@ try {
   await page.unroute("https://tile.openstreetmap.org/**");
   await page.goto(url + "/#dashboard");
   console.log("✓ OSM attribution, referrer, and failed-tile fallback");
+  // Second client for the live-update check. Failures here are otherwise
+  // invisible, so record what it was told by the API.
   const peer = await context.newPage();
+  const peerProblems = [];
+  peer.on("pageerror", (e) => peerProblems.push(`pageerror: ${e.message}`));
+  peer.on("requestfailed", (r) =>
+    peerProblems.push(`requestfailed: ${r.url()} ${r.failure()?.errorText}`),
+  );
+  peer.on("response", (r) => {
+    if (r.status() >= 400) peerProblems.push(`HTTP ${r.status()} ${r.url()}`);
+  });
+  // Register the waiter before navigating so the handshake cannot be missed.
+  // Without it the mutation below can be emitted before this client's event
+  // stream is open, and the assertion would depend on the 30-second polling
+  // fallback instead of the live push path.
+  const peerStreamReady = peer.waitForResponse(
+    (response) =>
+      response.url().includes("/api/events") && response.status() === 200,
+    { timeout: 15000 },
+  );
   await peer.goto(url + "/#inspection");
   await expect(
     peer.getByRole("heading", { name: "Inspections", exact: true }),
   ).toBeVisible();
+  await peerStreamReady;
   await page
     .getByRole("button", { name: "New inspection", exact: true })
     .click();
@@ -116,9 +151,16 @@ try {
     .fill("Browser-tested safety inspection");
   await page.getByRole("button", { name: "Save record", exact: true }).click();
   await expect(page.getByRole("status")).toContainText("created successfully");
-  await expect(
-    peer.getByText("Browser-tested safety inspection", { exact: true }),
-  ).toBeVisible({ timeout: 8000 });
+  try {
+    await expect(
+      peer.getByText("Browser-tested safety inspection", { exact: true }),
+    ).toBeVisible({ timeout: 8000 });
+  } catch (error) {
+    throw new Error(
+      `second client did not receive the update: ${peerProblems.join(" | ") || "no transport errors recorded"}`,
+      { cause: error },
+    );
+  }
   await peer.close();
   console.log(
     "✓ Live event updates reach a second client without manual refresh",
@@ -201,7 +243,14 @@ try {
         const docs = await page.request
           .get(url + "/api/documents")
           .then((r) => r.json());
-        return docs.find((d) => d.name === "ocr-check.png")?.text || "";
+        const match = docs.find((d) => d.name === "ocr-check.png");
+        if (!match) return "";
+        // The list returns metadata only; extracted text comes from the
+        // authorized detail route.
+        return page.request
+          .get(`${url}/api/documents/${match.id}`)
+          .then((r) => r.json())
+          .then((full) => full.text || "");
       },
       { timeout: 60000, intervals: [1000, 2000, 3000] },
     )
@@ -301,15 +350,20 @@ try {
   assert.deepEqual(errors, []);
   console.log("✓ No browser runtime errors");
 } catch (e) {
-  await page.screenshot({
-    path: path.join(screenshotDir, "error.png"),
-    fullPage: true,
-  });
+  // Report the original failure first: a diagnostic screenshot must never
+  // replace the real error with a secondary one.
+  console.error("Browser test failed:", e?.message || e);
+  await page
+    .screenshot({ path: path.join(screenshotDir, "error.png"), fullPage: true })
+    .catch((shotError) =>
+      console.error("Diagnostic screenshot failed:", shotError?.message),
+    );
   console.log(
     await page
       .locator("[role=dialog]")
       .innerText()
-      .catch(() => page.locator("main").innerText()),
+      .catch(() => page.locator("main").innerText())
+      .catch(() => "<page unavailable>"),
   );
   throw e;
 } finally {

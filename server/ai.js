@@ -53,6 +53,23 @@ const cosine = (a, b) => {
   }
   return aa && bb ? dot / Math.sqrt(aa * bb) : 0;
 };
+// Function words and generic instruction verbs carry no evidence signal. Left
+// in, they retrieve documents that share only "the" or "for" with a question
+// and present them as supporting evidence.
+const STOPWORDS = new Set([
+  "about","after","again","against","all","also","an","and","any","are","as","at","be",
+  "because","been","before","being","below","beside","between","both","but","by","can",
+  "could","describe","did","do","does","doing","down","during","each","explain","few",
+  "find","for","from","further","get","give","had","has","have","having","here","how",
+  "into","is","it","its","just","last","less","list","made","make","many","may","me",
+  "might","more","most","much","must","my","need","needs","next","no","nor","not","now",
+  "of","off","on","once","only","or","other","our","out","over","own","per","please",
+  "same","say","shall","she","should","show","so","some","state","such","summarise",
+  "summarize","tell","than","that","the","their","them","then","there","these","they",
+  "this","those","through","to","too","under","until","up","us","use","used","using",
+  "very","via","was","we","were","what","when","where","which","while","who","whom",
+  "why","will","with","would","you","your",
+]);
 export async function retrieve(
   db,
   docs,
@@ -62,7 +79,7 @@ export async function retrieve(
   const terms = query
     .toLowerCase()
     .split(/\W+/)
-    .filter((s) => s.length > 2);
+    .filter((s) => s.length > 2 && !STOPWORDS.has(s));
   let method = "keyword";
   let warning = null;
   let scored = docs.map((d) => ({

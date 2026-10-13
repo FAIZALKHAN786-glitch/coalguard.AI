@@ -51,11 +51,11 @@ For a proxy that rewrites the Host header, set `APP_ORIGIN` to the exact trusted
 - **Operations, environment, attendance, and grievances:** create/read/update/delete workflows, validated measurements and dates, search, filters, pagination, and exports.
 - **Field PWA:** mobile layout, consent-based device geolocation and accuracy, original capture timestamp, IndexedDB offline queue, explicit sync, and server-side idempotency. Reports are never assigned fabricated GPS coordinates.
 - **Live updates:** authenticated Server-Sent Events invalidate client data after writes; 30-second refresh is a fallback. Notifications derive from the current record state, with due-soon reminders, overdue flags, and escalation after seven days overdue.
-- **Documents:** private PDF/TXT/PNG/JPEG storage, PDF text extraction, bundled English image OCR, retryable extraction states, evidence IDs, authenticated download, and searchable extracted text. Upload limit: 10 MB.
+- **Documents:** private PDF/TXT/PNG/JPEG storage, PDF text extraction, bundled English image OCR, retryable extraction states, evidence IDs, authenticated download, and searchable extracted text. Upload limit: 10 MB; extraction is bounded to 8 pending jobs per process.
 - **Intelligence:** deterministic, evidence-linked risk signals; optional decision/text/embedding/reranking adapters. Missing keys result in honestly labelled rule-based output, not simulated AI.
 - **Reports:** actual CSV/PDF downloads, mine and date filters, export auditing, spreadsheet-formula escaping. Reports are internal governance documents, not statutory submission formats.
 - **Audit:** transactional record-change logging and SHA-256 linked entries, with verification. Deleting a record does not delete its audit history.
-- **Access:** bcrypt password hashes, hashed expiring session tokens, HttpOnly cookies, same-origin write protection, role/mine restrictions, input validation, optimistic revision checks, and rate limits.
+- **Access:** bcrypt password hashes, hashed expiring session tokens, HttpOnly cookies, same-origin write protection, role/mine restrictions (portfolio visibility is tied to the administrator and regulator roles, never to an empty site list), input validation, optimistic revision checks, and layered rate limits (per account and process-wide).
 
 ## Connect your AI providers
 
@@ -102,13 +102,22 @@ AI_RERANK_MODEL=your-reranker-model-id
 Use a **fresh database**, turn off demo mode, and set a strong initial administrator password. The server refuses to run in non-demo mode with a known demo database.
 
 ```dotenv
+NODE_ENV=production
 DEMO_MODE=false
 DATABASE_PATH=./data/production.sqlite
 ADMIN_EMAIL=admin@your-organization.in
 ADMIN_PASSWORD=use-a-long-unique-secret-from-your-secret-manager
 COOKIE_SECURE=true
+# Only needed when the proxy is not on this host; see docs/OPERATIONS.md.
+TRUST_PROXY=
+# Only needed when your proxy rewrites Host.
+APP_ORIGIN=
 PORT=3001
 ```
+
+`ADMIN_EMAIL` must be a valid address you control and `ADMIN_PASSWORD` at least
+12 characters; startup fails otherwise. Both are used only on first
+initialization.
 
 ```bash
 npm ci
@@ -116,7 +125,11 @@ npm run build
 npm start
 ```
 
-The production server serves both the frontend and `/api` on port 3001. Place it behind an HTTPS reverse proxy; preserve `Host`, forward the scheme, and disable buffering for `/api/events`. Secure cookies require HTTPS. The initial administrator is created only when the database has no users; changing `ADMIN_PASSWORD` later does **not** rotate an existing user's password.
+The production server serves both the frontend and `/api` on port 3001. Place it behind an HTTPS reverse proxy; preserve `Host`, forward the scheme, and disable buffering for `/api/events`. Secure cookies require HTTPS, and startup fails if `APP_ORIGIN` is HTTPS while `COOKIE_SECURE` is not `true`. The initial administrator is created only when the database has no users; changing `ADMIN_PASSWORD` later does **not** rotate an existing user's password.
+
+Forwarded-header trust is explicit. `TRUST_PROXY` defaults to `loopback` (a proxy on this host) and accepts `false`, a hop count `1`–`5`, `loopback`, `linklocal`, `uniquelocal`, or a comma-separated CIDR list. `TRUST_PROXY=true` is refused, because trusting every forwarder lets any client forge its own address and evade rate limits. Read [docs/OPERATIONS.md](docs/OPERATIONS.md) before exposing the service.
+
+Liveness is `GET /api/health`; readiness (database reachable, schema at the expected version) is `GET /api/ready`. Neither is rate limited.
 
 ```bash
 docker build -t coalguard .
@@ -136,23 +149,38 @@ Only unsynced field reports plus the minimal user/site bootstrap are stored loca
 
 ```bash
 npm run check          # TypeScript
-npm test               # API security, workflow, and AI adapter tests
+npm test               # API security, workflow, migration, production and AI adapter tests
 npm run test:browser   # Builds the app; full browser workflow tests
 npm run test:auth-browser # HTTPS iframe cookies, expiry recovery, blocked-cookie guidance
+npm run test:load      # Synthetic dataset; latency, throughput and concurrency gates
 npm audit --omit=dev
 ```
+
+The headless browser tests need a usable font configuration. Without one
+Chromium aborts inside Skia and Playwright reports only a closed-browser error;
+the harness now prints the prerequisite. On Debian/Ubuntu install `fontconfig`
+and a font package (for example `fonts-dejavu-core`), or point `FONTCONFIG_FILE`
+at a valid `fonts.conf`.
+
+`npm run test:load` seeds its own database with synthetic records (50,000 by
+default; `LOAD_RECORDS` and `LOAD_ITERATIONS` override it), measures p50/p95/p99
+latency, response size and error rate per endpoint, and asserts concurrency
+invariants: exactly one winner under simultaneous updates, and one stored record
+for replayed offline submissions. It must only ever run against synthetic data.
 
 Browser tests use a disposable SQLite database and bundled headless Chromium. They cover desktop/mobile rendering, inspection CRUD, filters/search, AI fallback, document upload, actual image OCR, a full offline reload/queue/sync cycle, all navigation destinations, and audit verification. Screenshots are written to ignored `test-results/`. The bundled browser harness targets Linux x64; use an appropriate Playwright browser for other platforms.
 
 ## Important deployment boundaries
 
-- This implementation is **single-organization, multi-mine**, with SQLite WAL and local file storage. It is appropriate for a pilot on a single persistent server, not a claim of proven nationwide high availability. Move to PostgreSQL, object storage, shared event delivery, and durable background workers before horizontal scaling.
+- This implementation is **single-organization, multi-mine**, with SQLite WAL and local file storage. It is appropriate for a pilot on a single persistent server, not a claim of proven nationwide high availability. Rate limits, sessions, and event delivery are in-process, so a second replica would not share them. Move to PostgreSQL, object storage, shared sessions and limits, and durable background workers before horizontal scaling; measured triggers are in [docs/OPERATIONS.md](docs/OPERATIONS.md).
+- Database upgrades are versioned and transactional (`PRAGMA user_version`), never destructive, and refuse to run against a database from a newer release. Back up the database and the `uploads/` directory together; the restore procedure and its verification test are in [docs/OPERATIONS.md](docs/OPERATIONS.md).
 - Statutory references and deadlines are illustrative, **not a maintained legal rules library**. Validate controls against current law, licences, site consents, and regulatory directions.
 - Screening thresholds (PM₁₀ >100 µg/m³, noise >75 dB, pH outside 6.5–8.5, output below 80% of target) are illustrative. Sampling method, averaging periods, and site limits must govern legal interpretation. Risk screening is not a trained predictive model.
 - Notifications are **in-app**. Email/SMS/WhatsApp/push providers, regulatory portal submissions, ERP/HRIS connectors, SSO/MFA, and native device attestation are not wired up.
 - Image OCR supports English. Scanned PDFs without a text layer are clearly marked; upload page images for OCR. Text PDF extraction is limited to 100 pages and stored extraction to 250,000 characters. OCR is serialized within the process; interrupted work is marked failed and can be retried.
-- Retrieval embeds at most 30 authorized documents per request, using the first 12,000 characters of each. It is not a full vector-database/chunking pipeline. The text assistant sees a bounded workspace snapshot and up to four retrieved documents.
-- Audit chaining is **tamper-evident, not immutable**: a privileged database operator could rewrite the entire chain. For stronger assurance, externally anchor signed hashes and use write-once retention.
+- Retrieval ignores common function words, embeds at most 30 authorized documents per request and uses the first 12,000 characters of each. It is not a full vector-database/chunking pipeline, so recall and ranking on large corpora are limited. The text assistant sees a bounded workspace snapshot and up to four retrieved documents.
+- Audit chaining is **tamper-evident, not immutable**. `GET /api/audit/verify` detects altered, reordered, inserted and removed entries (including removal of the newest ones, via an anchored length and head hash), but a privileged database operator who can write the database file could rewrite the whole chain and its anchor together. For stronger assurance, externally anchor signed hashes and use write-once retention.
+- List endpoints are bounded: records and documents return at most 2,000 rows per request with `X-Total-Count` (the interface asks for 2,000 records and 200 documents), notifications return at most 200 reminders, exports are limited to 10,000 rows and return `413` when a filter is too broad, and analytical scans stop at 20,000 records and report `truncated:true`. Documents are listed as metadata only; extracted text is fetched per document from `GET /api/documents/:id`.
 - User provisioning is available. Enterprise account lifecycle, self-service recovery, password rotation, malware scanning, independently reviewed accessibility/security, disaster recovery, and operational SLAs must be addressed before a sensitive live deployment.
 
-See [architecture and API notes](docs/ARCHITECTURE.md).
+See [architecture and API notes](docs/ARCHITECTURE.md), [operating procedures and checklists](docs/OPERATIONS.md), and the [latest audit and hardening report](docs/AUDIT-REPORT.md).

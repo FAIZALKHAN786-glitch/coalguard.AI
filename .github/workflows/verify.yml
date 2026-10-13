@@ -2,20 +2,36 @@ name: Verify CoalGuard
 on:
   push:
   pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          # The documented minimum: the first release where node:sqlite needs no
+          # CLI flag.
+          node-version: "22.13.0"
           cache: npm
       - run: npm ci
-      - run: npm run check
-      - run: npm test
-      - run: npm run test:browser
-      - run: node tests/auth-browser.mjs
+      - name: Dependency audit (high and above)
+        run: npm audit --omit=dev --audit-level=high
+      - name: Type check
+        run: npm run check
+      - name: Unit, integration, security, migration and production tests
+        run: npm test
+      - name: Browser workflows
+        run: npm run test:browser
+      - name: HTTPS embedded session handling
+        run: node tests/auth-browser.mjs
+      - name: Load and concurrency gates on synthetic data
+        run: LOAD_RECORDS=10000 LOAD_ITERATIONS=50 npm run test:load
       - uses: actions/upload-artifact@v4
         if: always()
         with:
