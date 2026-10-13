@@ -82,7 +82,7 @@ async function upload(app, agent, document) {
 async function demoDataset() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cg-ai-eval-"));
   dirs.push(dir);
-  const { app, db } = createApp({
+  const { app, db } = await createApp({
     database: path.join(dir, "eval.sqlite"),
     demo: true,
   });
@@ -107,7 +107,7 @@ async function privateDataset() {
   process.env.AI_TEXT_API_KEY = "fictional-eval-credential";
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cg-ai-eval-private-"));
   dirs.push(dir);
-  const { app, db } = createApp({
+  const { app, db } = await createApp({
     database: path.join(dir, "eval.sqlite"),
     demo: false,
   });

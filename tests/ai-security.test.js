@@ -153,7 +153,7 @@ test("public demo makes no external text, decision, embedding, or reranking call
     throw Error("Provider must not be contacted");
   };
   const dir = temp();
-  const { app, db } = createApp({
+  const { app, db } = await createApp({
     database: path.join(dir, "demo.sqlite"),
     demo: true,
   });
@@ -195,7 +195,7 @@ test("private deployment activation enables only authenticated calls; disabling 
   process.env.ADMIN_EMAIL = "test@example.in";
   process.env.ADMIN_PASSWORD = "TestPassword@2026";
   const dir = temp();
-  const { app, db } = createApp({
+  const { app, db } = await createApp({
     database: path.join(dir, "private.sqlite"),
     demo: false,
     embeddedPreview: false,

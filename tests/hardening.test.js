@@ -18,8 +18,8 @@ before(() => {
 });
 after(() => fs.rmSync(dir, { recursive: true, force: true }));
 
-const start = (options = {}) =>
-  createApp({
+const start = async (options = {}) =>
+  await createApp({
     database: path.join(dir, `db-${Math.random().toString(36).slice(2)}.sqlite`),
     demo: true,
     ...options,
@@ -376,7 +376,7 @@ test("production framing and proxy defaults are not demonstration defaults", asy
   process.env.ADMIN_PASSWORD = "Production-Password-2026";
   process.env.ADMIN_EMAIL = "framing-check@example.in";
   try {
-    const instance = createApp({
+    const instance = await createApp({
       database: path.join(dir, "production.sqlite"),
       demo: false,
     });
@@ -396,7 +396,7 @@ test("production framing and proxy defaults are not demonstration defaults", asy
 
     // An operator who really does embed the workspace can name the host.
     process.env.FRAME_ANCESTORS = "https://ops.example.in";
-    const framed = createApp({
+    const framed = await createApp({
       database: path.join(dir, "production-frame-env.sqlite"),
       demo: false,
     });

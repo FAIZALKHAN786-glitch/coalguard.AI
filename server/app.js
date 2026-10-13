@@ -19,7 +19,7 @@ import {
   verifyAudit,
   record,
   transaction,
-} from "./db.js";
+} from "./db-adapter.js";
 import { seed } from "./seed.js";
 import {
   statuses,
@@ -95,7 +95,7 @@ const safeUser = (u) => ({
   role: u.role,
   mines: JSON.parse(u.mines),
 });
-export function createApp({
+export async function createApp({
   database = process.env.DATABASE_PATH || "./data/coalguard.sqlite",
   demo = process.env.DEMO_MODE === "true" ||
     (process.env.DEMO_MODE === undefined &&
@@ -153,8 +153,8 @@ export function createApp({
     );
   }
   const db = openDatabase(database);
-  if (!demo && db.prepare("SELECT id FROM users WHERE id='u-admin'").get()) {
-    db.close();
+  if (!demo && await db.prepare("SELECT id FROM users WHERE id='u-admin'").get()) {
+    await db.close();
     throw new Error(
       "Production cannot use a demonstration database. Configure a new DATABASE_PATH.",
     );
@@ -167,7 +167,7 @@ export function createApp({
       "uploads",
     );
   fs.mkdirSync(uploadDir, { recursive: true });
-  db.prepare(
+  await db.prepare(
     "UPDATE documents SET status='failed' WHERE status='processing'",
   ).run();
   const app = express();
@@ -203,7 +203,7 @@ export function createApp({
     }),
   );
   // Arena preview embeds the application; production deployments may set stricter frame-ancestors at their reverse proxy.
-  app.use((req, res, next) => {
+  app.use(async (req, res, next) => {
     res.removeHeader("X-Frame-Options");
     if (process.env.NODE_ENV !== "production")
       res.removeHeader("Content-Security-Policy");
@@ -211,7 +211,7 @@ export function createApp({
   });
   app.use(express.json({ limit: "100kb" }));
   app.use(cookieParser());
-  app.use("/api", (req, res, next) => {
+  app.use("/api", async (req, res, next) => {
     res.set("Cache-Control", "no-store");
     if (
       demo &&
@@ -301,21 +301,21 @@ export function createApp({
     message: { error: "The service is busy. Please retry in a moment." },
   });
   app.use("/api", apiLimit, globalLimit);
-  app.get("/api/health", (req, res) => res.json({ ok: true }));
-  app.get("/api/ready", (req, res) => {
+  app.get("/api/health", async (req, res) => { res.json({ ok: true }); });
+  app.get("/api/ready", async (req, res) => {
     try {
-      const actual = db.prepare("PRAGMA user_version").get().user_version;
+      const actual = (await db.prepare("PRAGMA user_version").get()).user_version;
       const expected = schemaVersion();
       if (actual !== expected)
         throw new Error(`schema version ${actual} is not ${expected}`);
-      db.prepare("SELECT 1 AS ok").get();
+      await db.prepare("SELECT 1 AS ok").get();
       res.json({ ready: true, schemaVersion: actual });
     } catch {
       // Readiness must not disclose paths, credentials or driver detail.
       res.status(503).json({ ready: false });
     }
   });
-  app.get("/api/config", (req, res) =>
+  app.get("/api/config", async (req, res) =>
     res.json({ demo, embeddedPreview, version: "1.0.0" }),
   );
   const authLimit = rateLimit({
@@ -327,10 +327,10 @@ export function createApp({
   });
   const sessionKey = (token) =>
     createHash("sha256").update(token).digest("hex");
-  function session(res, u, memory = false) {
+  async function session (res, u, memory = false) {
     const token = randomBytes(32).toString("hex");
-    db.prepare("DELETE FROM sessions WHERE expires < ?").run(Date.now());
-    db.prepare("INSERT INTO sessions VALUES(?,?,?)").run(
+    await db.prepare("DELETE FROM sessions WHERE expires < ?").run(Date.now());
+    await db.prepare("INSERT INTO sessions VALUES(?,?,?)").run(
       sessionKey(token),
       u.id,
       Date.now() + (memory ? 3600000 : 12 * 3600000),
@@ -362,25 +362,25 @@ export function createApp({
         "$2b$12$JpkLTWpHPG2m1igbsNjp/uLCnsASAAW2AJkXCCX6jZVBbZUtHYiS2",
     );
     if (!u || !good) throw fail(401, "Incorrect email or password");
-    const accessToken = session(res, u, memory);
-    audit(db, u, "signed_in", "session", null);
+    const accessToken = await session(res, u, memory);
+    await audit(db, u, "signed_in", "session", null);
     res.json({
       user: safeUser(u),
       ...(memory ? { accessToken, transport: "memory" } : {}),
     });
   });
-  app.post("/api/auth/demo", authLimit, (req, res) => {
+  app.post("/api/auth/demo", authLimit, async (req, res) => {
     if (!demo) throw fail(404, "Demo access is disabled");
-    const u = db.prepare("SELECT * FROM users WHERE id='u-admin'").get();
+    const u = await db.prepare("SELECT * FROM users WHERE id='u-admin'").get();
     if (!u) throw fail(404, "Demo workspace is unavailable");
     const memory = memoryRequested(req);
-    const accessToken = session(res, u, memory);
+    const accessToken = await session(res, u, memory);
     res.json({
       user: safeUser(u),
       ...(memory ? { accessToken, transport: "memory" } : {}),
     });
   });
-  app.use("/api", (req, res, next) => {
+  app.use("/api", async (req, res, next) => {
     const bearer =
       demo &&
       embeddedPreview &&
@@ -392,15 +392,11 @@ export function createApp({
       embeddedPreview &&
       req.get("x-coalguard-session")?.match(/^[a-f0-9]{64}$/)?.[0];
     const token = previewToken || bearer || req.cookies[cookieName];
-    const u =
-      token &&
-      db
-        .prepare(
+    const u = token && (await db.prepare(
           "SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=? AND s.expires>?",
-        )
-        .get(sessionKey(token), Date.now());
+        ).get(sessionKey(token), Date.now()));
     if (!u)
-      return res.status(401).json({ error: "Please sign in to continue" });
+      return      return res.status(401).json({ error: "Please sign in to continue" });
     req.user = safeUser(u);
     req.sessionTokenHash = sessionKey(token);
     if (!["GET", "HEAD", "OPTIONS"].includes(req.method))
@@ -417,8 +413,8 @@ export function createApp({
     portfolioRoles.includes(u.role)
       ? u.mines.length === 0 || u.mines.includes(id)
       : u.mines.includes(id);
-  function requireMine(u, id) {
-    if (!db.prepare("SELECT id FROM mines WHERE id=?").get(id))
+  async function requireMine (u, id) {
+    if (!(await db.prepare("SELECT id FROM mines WHERE id=?").get(id)))
       throw fail(404, "Mine not found");
     if (!mineAccess(u, id))
       throw fail(403, "This mine is outside your assigned access");
@@ -428,31 +424,26 @@ export function createApp({
       throw fail(403, "Your role does not permit this action");
   }
   const placeholders = (n) => Array(n).fill("?").join(",");
-  function scopedMineIds(u, filter) {
+  async function scopedMineIds (u, filter) {
     if (filter && filter !== "all") {
-      requireMine(u, filter);
+      await requireMine(u, filter);
       return [filter];
     }
-    return db
-      .prepare("SELECT id FROM mines ORDER BY id")
-      .all()
-      .map((m) => m.id)
-      .filter((id) => mineAccess(u, id));
+    const rows = await db.prepare("SELECT id FROM mines ORDER BY id").all();
+    return rows.map((m) => m.id).filter((id) => mineAccess(u, id));
   }
-  function scopedMines(u, filter) {
-    const ids = scopedMineIds(u, filter);
+  async function scopedMines (u, filter) {
+    const ids = await scopedMineIds(u, filter);
     if (!ids.length) return [];
-    return db
-      .prepare(
-        `SELECT * FROM mines WHERE id IN (${placeholders(ids.length)}) ORDER BY name`,
-      )
-      .all(...ids);
+    return (await db.prepare(
+      `SELECT * FROM mines WHERE id IN (${placeholders(ids.length)}) ORDER BY name`,
+    ).all(...ids));
   }
   // Mine scope, record kind, status, search text and ordering are pushed into
   // SQL with a bound row limit: a request never reads a whole table to filter
   // it in memory, and the result size is deterministic.
-  function recordFilter(u, filter, { kind, status, q } = {}) {
-    const ids = scopedMineIds(u, filter);
+  async function recordFilter (u, filter, { kind, status, q } = {}) {
+    const ids = await scopedMineIds(u, filter);
     if (!ids.length) return null;
     const where = [`mine_id IN (${placeholders(ids.length)})`];
     const params = [...ids];
@@ -472,27 +463,23 @@ export function createApp({
     }
     return { clause: where.join(" AND "), params };
   }
-  function countRecords(u, filter, options = {}) {
-    const built = recordFilter(u, filter, options);
+  async function countRecords (u, filter, options = {}) {
+    const built = await recordFilter(u, filter, options);
     if (!built) return 0;
-    return db
-      .prepare(`SELECT count(*) n FROM records WHERE ${built.clause}`)
-      .get(...built.params).n;
+    return (await db.prepare(`SELECT count(*) n FROM records WHERE ${built.clause}`)
+      .get(...built.params)).n;
   }
-  function scopedRecords(u, filter, options = {}) {
-    const built = recordFilter(u, filter, options);
+  async function scopedRecords (u, filter, options = {}) {
+    const built = await recordFilter(u, filter, options);
     if (!built) return [];
     const limit = Math.min(
       Number(options.limit) || ANALYTICS_LIMIT_MAX,
       ANALYTICS_LIMIT_MAX,
     );
     const offset = Math.max(Number(options.offset) || 0, 0);
-    return db
-      .prepare(
-        `SELECT * FROM records WHERE ${built.clause} ORDER BY created_at DESC,rowid DESC LIMIT ? OFFSET ?`,
-      )
-      .all(...built.params, limit, offset)
-      .map(record);
+    return (await db.prepare(
+      `SELECT * FROM records WHERE ${built.clause} ORDER BY created_at DESC,rowid DESC LIMIT ? OFFSET ?`,
+    ).all(...built.params, limit, offset)).map(record);
   }
   function canWrite(u, kind) {
     requireRole(u, [
@@ -501,7 +488,7 @@ export function createApp({
       ...(["field", "attendance", "grievance"].includes(kind) ? ["field"] : []),
     ]);
   }
-  app.get("/api/events", (req, res) => {
+  app.get("/api/events", async (req, res) => {
     res.set({
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
@@ -512,10 +499,8 @@ export function createApp({
     res.write("event: ready\ndata: {}\n\n");
     const changed = () => res.write("event: change\ndata: {}\n\n");
     events.on("change", changed);
-    const heartbeat = setInterval(() => {
-      const valid = db
-        .prepare("SELECT token FROM sessions WHERE token=? AND expires>?")
-        .get(req.sessionTokenHash, Date.now());
+    const heartbeat = setInterval(async () => {
+      const valid = await db.prepare("SELECT token FROM sessions WHERE token=? AND expires>?").get(req.sessionTokenHash, Date.now());
       if (!valid) {
         res.write("event: expired\ndata: {}\n\n");
         res.end();
@@ -528,13 +513,13 @@ export function createApp({
       events.off("change", changed);
     });
   });
-  app.get("/api/auth/me", (req, res) => res.json({ user: req.user }));
-  app.post("/api/auth/logout", (req, res) => {
-    db.prepare("DELETE FROM sessions WHERE token=?").run(req.sessionTokenHash);
+  app.get("/api/auth/me", async (req, res) => { res.json({ user: req.user }); });
+  app.post("/api/auth/logout", async (req, res) => {
+    await db.prepare("DELETE FROM sessions WHERE token=?").run(req.sessionTokenHash);
     res.clearCookie(cookieName, cookieOptions);
     res.json({ ok: true });
   });
-  app.use("/api", (req, res, next) => {
+  app.use("/api", async (req, res, next) => {
     for (const key of [
       "mine",
       "q",
@@ -552,13 +537,13 @@ export function createApp({
         return res.status(400).json({ error: "Invalid query parameter" });
     next();
   });
-  app.get("/api/mines", (req, res) => res.json(scopedMines(req.user)));
-  app.post("/api/mines", (req, res) => {
+  app.get("/api/mines", async (req, res) => res.json(await scopedMines(req.user)));
+  app.post("/api/mines", async (req, res) => {
     requireRole(req.user, ["admin"]);
     const m = mineSchema.parse(req.body);
     const id = uuid();
-    transaction(db, () => {
-      db.prepare("INSERT INTO mines VALUES(?,?,?,?,?,?,?)").run(
+    await transaction(db, async () => {
+      await db.prepare("INSERT INTO mines VALUES(?,?,?,?,?,?,?)").run(
         id,
         m.name,
         m.subsidiary,
@@ -567,16 +552,16 @@ export function createApp({
         m.longitude,
         m.capacity,
       );
-      audit(db, req.user, "created", "mine", id, m);
+      await audit(db, req.user, "created", "mine", id, m);
     });
     res.status(201).json({ id, ...m });
   });
-  app.get("/api/dashboard", (req, res) => {
-    const mines = scopedMines(req.user, req.query.mine);
-    const rows = scopedRecords(req.user, req.query.mine);
+  app.get("/api/dashboard", async (req, res) => {
+    const mines = await scopedMines(req.user, req.query.mine);
+    const rows = await scopedRecords(req.user, req.query.mine);
     // The analytical scan is capped; the flag keeps truncation visible instead
     // of silently reporting partial aggregates.
-    const total = countRecords(req.user, req.query.mine);
+    const total = await countRecords(req.user, req.query.mine);
     res.json({
       ...dashboard(rows, mines),
       updatedAt: now(),
@@ -585,7 +570,7 @@ export function createApp({
       truncated: total > rows.length,
     });
   });
-  app.get("/api/records/:kind", (req, res) => {
+  app.get("/api/records/:kind", async (req, res) => {
     if (!statuses[req.params.kind]) throw fail(404, "Unknown record type");
     const kind = req.params.kind;
     if (req.query.status && !statuses[kind].includes(req.query.status))
@@ -598,18 +583,18 @@ export function createApp({
       limit,
       offset,
     };
-    const total = countRecords(req.user, req.query.mine, options);
-    const rows = scopedRecords(req.user, req.query.mine, options);
+    const total = await countRecords(req.user, req.query.mine, options);
+    const rows = await scopedRecords(req.user, req.query.mine, options);
     res.set("X-Total-Count", String(total));
     res.set("X-Result-Limit", String(limit));
     res.json(rows);
   });
-  app.post("/api/records/:kind", (req, res) => {
+  app.post("/api/records/:kind", async (req, res) => {
     const { kind } = req.params;
     if (!statuses[kind]) throw fail(404, "Unknown record type");
     canWrite(req.user, kind);
     const r = recordSchema(kind).parse(req.body);
-    requireMine(req.user, r.mineId);
+    await requireMine(req.user, r.mineId);
     if (
       kind === "compliance" &&
       r.status === "compliant" &&
@@ -637,7 +622,7 @@ export function createApp({
     const id = uuid(),
       time = now();
     let replayId = null;
-    transaction(db, () => {
+    await transaction(db, async () => {
       // The receipt is claimed inside the same transaction as the insert, so
       // BEGIN IMMEDIATE serializes simultaneous replays of one offline report:
       // the second request returns the first record and writes no second audit
@@ -651,7 +636,7 @@ export function createApp({
           return;
         }
       }
-      db.prepare(
+      await db.prepare(
         "INSERT INTO records(id,kind,mine_id,title,category,status,priority,due_date,owner,notes,data,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
       ).run(
         id,
@@ -669,9 +654,9 @@ export function createApp({
         time,
         time,
       );
-      audit(db, req.user, "created", `${kind}:${id}`, r.mineId, r);
+      await audit(db, req.user, "created", `${kind}:${id}`, r.mineId, r);
       if (key)
-        db.prepare("INSERT INTO idempotency VALUES(?,?,?)").run(
+        await db.prepare("INSERT INTO idempotency VALUES(?,?,?)").run(
           req.user.id,
           key,
           id,
@@ -679,7 +664,7 @@ export function createApp({
     });
     if (replayId) {
       const existing = record(
-        db.prepare("SELECT * FROM records WHERE id=?").get(replayId),
+        await db.prepare("SELECT * FROM records WHERE id=?").get(replayId),
       );
       if (!existing)
         throw fail(409, "Previously submitted record was removed");
@@ -687,19 +672,19 @@ export function createApp({
     }
     res
       .status(201)
-      .json(record(db.prepare("SELECT * FROM records WHERE id=?").get(id)));
+      .json(record(await db.prepare("SELECT * FROM records WHERE id=?").get(id)));
   });
-  app.patch("/api/records/:kind/:id", (req, res) => {
+  app.patch("/api/records/:kind/:id", async (req, res) => {
     const { kind, id } = req.params;
     if (!statuses[kind]) throw fail(404, "Unknown record type");
     canWrite(req.user, kind);
     const before = record(
-      db.prepare("SELECT * FROM records WHERE id=? AND kind=?").get(id, kind),
+      await db.prepare("SELECT * FROM records WHERE id=? AND kind=?").get(id, kind),
     );
     if (!before) throw fail(404, "Record not found");
-    requireMine(req.user, before.mineId);
+    await requireMine(req.user, before.mineId);
     const r = recordSchema(kind).parse(req.body);
-    requireMine(req.user, r.mineId);
+    await requireMine(req.user, r.mineId);
     if (r.version !== before.version)
       throw fail(
         409,
@@ -727,8 +712,8 @@ export function createApp({
       if (!s || s.mine_id !== r.mineId)
         throw fail(400, "Source record must belong to the same mine");
     }
-    transaction(db, () => {
-      db.prepare(
+    await transaction(db, async () => {
+      await db.prepare(
         "UPDATE records SET mine_id=?,title=?,category=?,status=?,priority=?,due_date=?,owner=?,notes=?,data=?,updated_at=?,version=version+1 WHERE id=?",
       ).run(
         r.mineId,
@@ -754,9 +739,9 @@ export function createApp({
         { before, after: r },
       );
     });
-    res.json(record(db.prepare("SELECT * FROM records WHERE id=?").get(id)));
+    res.json(record(await db.prepare("SELECT * FROM records WHERE id=?").get(id)));
   });
-  app.delete("/api/records/:kind/:id", (req, res) => {
+  app.delete("/api/records/:kind/:id", async (req, res) => {
     requireRole(req.user, ["admin"]);
     const row = record(
       db
@@ -764,14 +749,14 @@ export function createApp({
         .get(req.params.id, req.params.kind),
     );
     if (!row) throw fail(404, "Record not found");
-    requireMine(req.user, row.mineId);
-    transaction(db, () => {
-      db.prepare("DELETE FROM records WHERE id=?").run(row.id);
-      audit(db, req.user, "deleted", `${row.kind}:${row.id}`, row.mineId, row);
+    await requireMine(req.user, row.mineId);
+    await transaction(db, async () => {
+      await db.prepare("DELETE FROM records WHERE id=?").run(row.id);
+      await audit(db, req.user, "deleted", `${row.kind}:${row.id}`, row.mineId, row);
     });
     res.json({ ok: true });
   });
-  app.get("/api/notifications", (req, res) => {
+  app.get("/api/notifications", async (req, res) => {
     const read = new Set(
       db
         .prepare(
@@ -780,7 +765,7 @@ export function createApp({
         .all(req.user.id)
         .map((r) => r.notification_id),
     );
-    const all = notifications(scopedRecords(req.user, req.query.mine));
+    const all = notifications(await scopedRecords(req.user, req.query.mine));
     // Already ordered by due date, so truncation keeps the most urgent items.
     const visible = all.slice(0, NOTIFICATION_LIMIT);
     res.set("X-Total-Count", String(all.length));
@@ -788,25 +773,25 @@ export function createApp({
       visible.map((n) => ({ ...n, read: read.has(n.id) })),
     );
   });
-  app.post("/api/notifications/read", (req, res) => {
+  app.post("/api/notifications/read", async (req, res) => {
     const { ids } = z
       .object({ ids: z.array(z.string().max(200)).max(2000) })
       .parse(req.body);
     const allowed = new Set(
-      notifications(scopedRecords(req.user, "all")).map((n) => n.id),
+      notifications(await scopedRecords(req.user, "all")).map((n) => n.id),
     );
-    transaction(db, () => {
+    await transaction(db, async () => {
       for (const id of ids)
         if (allowed.has(id))
-          db.prepare(
+          await db.prepare(
             "INSERT OR IGNORE INTO read_notifications VALUES(?,?)",
           ).run(req.user.id, id);
     });
     res.json({ ok: true });
   });
-  app.get("/api/audit", (req, res) => {
+  app.get("/api/audit", async (req, res) => {
     const { limit, offset } = pageParams(req.query, 500, LIST_LIMIT_MAX);
-    const ids = scopedMineIds(req.user, req.query.mine);
+    const ids = await scopedMineIds(req.user, req.query.mine);
     const where = [];
     const params = [];
     if (req.user.role === "admin") {
@@ -828,7 +813,7 @@ export function createApp({
     res.set(
       "X-Total-Count",
       String(
-        db.prepare(`SELECT count(*) n FROM audit WHERE ${clause}`).get(...params)
+        await db.prepare(`SELECT count(*) n FROM audit WHERE ${clause}`).get(...params)
           .n,
       ),
     );
@@ -840,20 +825,20 @@ export function createApp({
         .all(...params, limit, offset),
     );
   });
-  app.get("/api/audit/verify", (req, res) => {
+  app.get("/api/audit/verify", async (req, res) => {
     requireRole(req.user, ["admin", "regulator"]);
-    res.json(verifyAudit(db));
+    res.json(await verifyAudit(db));
   });
-  app.get("/api/users", (req, res) => {
+  app.get("/api/users", async (req, res) => {
     requireRole(req.user, ["admin"]);
     res.json(
-      db.prepare("SELECT * FROM users ORDER BY name").all().map(safeUser),
+      (await db.prepare("SELECT * FROM users ORDER BY name").all()).map(safeUser),
     );
   });
   app.post("/api/users", async (req, res) => {
     requireRole(req.user, ["admin"]);
     const u = userSchema.parse(req.body);
-    for (const id of u.mines) requireMine(req.user, id);
+    for (const id of u.mines) await requireMine(req.user, id);
     if (["officer", "field"].includes(u.role) && !u.mines.length)
       throw fail(400, "Assign at least one mine to field staff and officers");
     if (
@@ -864,8 +849,8 @@ export function createApp({
       throw fail(409, "Email is already registered");
     const id = uuid();
     const password = await bcrypt.hash(u.password, 12);
-    transaction(db, () => {
-      db.prepare("INSERT INTO users VALUES(?,?,?,?,?,?)").run(
+    await transaction(db, async () => {
+      await db.prepare("INSERT INTO users VALUES(?,?,?,?,?,?)").run(
         id,
         u.name,
         u.email.toLowerCase(),
@@ -873,7 +858,7 @@ export function createApp({
         u.role,
         JSON.stringify(u.mines),
       );
-      audit(db, req.user, "created", "user", null, {
+      await audit(db, req.user, "created", "user", null, {
         id,
         name: u.name,
         role: u.role,
@@ -888,7 +873,7 @@ export function createApp({
       mines: u.mines,
     });
   });
-  app.get("/api/integrations", (req, res) => {
+  app.get("/api/integrations", async (req, res) => {
     const configuredModels = aiStatus(),
       policy = aiPolicy(demo);
     res.json({
@@ -927,8 +912,8 @@ export function createApp({
     const { text, storage_name, created_by, ...safe } = d;
     return { ...safe, textLength: text.length };
   };
-  app.get("/api/documents", (req, res) => {
-    const ids = scopedMineIds(req.user, req.query.mine);
+  app.get("/api/documents", async (req, res) => {
+    const ids = await scopedMineIds(req.user, req.query.mine);
     const { limit, offset } = pageParams(
       req.query,
       DOCUMENT_LIST_LIMIT,
@@ -956,12 +941,12 @@ export function createApp({
         .map(listDoc),
     );
   });
-  app.get("/api/documents/:id", (req, res) => {
+  app.get("/api/documents/:id", async (req, res) => {
     const d = db
       .prepare("SELECT * FROM documents WHERE id=?")
       .get(req.params.id);
     if (!d) throw fail(404, "Document not found");
-    requireMine(req.user, d.mine_id);
+    await requireMine(req.user, d.mine_id);
     res.json(publicDoc(d));
   });
   let ocrTail = Promise.resolve();
@@ -1025,13 +1010,13 @@ export function createApp({
     } catch {
       status = "failed";
     }
-    transaction(db, () => {
-      db.prepare("UPDATE documents SET text=?,status=? WHERE id=?").run(
+    await transaction(db, async () => {
+      await db.prepare("UPDATE documents SET text=?,status=? WHERE id=?").run(
         text.slice(0, 250000),
         status,
         id,
       );
-      const d = db.prepare("SELECT mine_id FROM documents WHERE id=?").get(id);
+      const d = await db.prepare("SELECT mine_id FROM documents WHERE id=?").get(id);
       if (d)
         audit(
           db,
@@ -1047,7 +1032,7 @@ export function createApp({
   app.post(
     "/api/documents",
     uploadLimit,
-    (req, res, next) => {
+    async (req, res, next) => {
       try {
         requireRole(req.user, ["admin", "officer"]);
         next();
@@ -1056,9 +1041,9 @@ export function createApp({
       }
     },
     upload.single("file"),
-    (req, res) => {
+    async (req, res) => {
       const mineId = z.string().parse(req.body.mineId);
-      requireMine(req.user, mineId);
+      await requireMine(req.user, mineId);
       if (!req.file) throw fail(400, "Choose a document to upload");
       const f = req.file,
         b = f.buffer;
@@ -1083,8 +1068,8 @@ export function createApp({
       const name = path.basename(f.originalname).slice(0, 200);
       fs.writeFileSync(path.join(uploadDir, storageName), b);
       try {
-        transaction(db, () => {
-          db.prepare("INSERT INTO documents VALUES(?,?,?,?,?,?,?,?,?,?)").run(
+        await transaction(db, async () => {
+          await db.prepare("INSERT INTO documents VALUES(?,?,?,?,?,?,?,?,?,?)").run(
             id,
             mineId,
             name,
@@ -1096,7 +1081,7 @@ export function createApp({
             req.user.id,
             now(),
           );
-          audit(db, req.user, "uploaded", `document:${id}`, mineId, {
+          await audit(db, req.user, "uploaded", `document:${id}`, mineId, {
             name,
             size: f.size,
             sha256: createHash("sha256").update(b).digest("hex"),
@@ -1110,36 +1095,36 @@ export function createApp({
       res
         .status(201)
         .json(
-          publicDoc(db.prepare("SELECT * FROM documents WHERE id=?").get(id)),
+          publicDoc(await db.prepare("SELECT * FROM documents WHERE id=?").get(id)),
         );
     },
   );
-  app.get("/api/documents/:id/download", (req, res) => {
+  app.get("/api/documents/:id/download", async (req, res) => {
     const d = db
       .prepare("SELECT * FROM documents WHERE id=?")
       .get(req.params.id);
     if (!d) throw fail(404, "Document not found");
-    requireMine(req.user, d.mine_id);
+    await requireMine(req.user, d.mine_id);
     res.type(d.mime);
     res.download(path.join(uploadDir, d.storage_name), d.name);
   });
-  app.post("/api/documents/:id/retry", uploadLimit, (req, res) => {
+  app.post("/api/documents/:id/retry", uploadLimit, async (req, res) => {
     requireRole(req.user, ["admin", "officer"]);
     const d = db
       .prepare("SELECT * FROM documents WHERE id=?")
       .get(req.params.id);
     if (!d) throw fail(404, "Document not found");
-    requireMine(req.user, d.mine_id);
+    await requireMine(req.user, d.mine_id);
     if (d.status === "processing")
       throw fail(409, "Extraction is already running");
     requireExtractionCapacity();
-    db.prepare("UPDATE documents SET status='processing' WHERE id=?").run(d.id);
+    await db.prepare("UPDATE documents SET status='processing' WHERE id=?").run(d.id);
     scheduleExtraction(
       d.id,
       fs.readFileSync(path.join(uploadDir, d.storage_name)),
       d.mime,
     );
-    audit(db, req.user, "retried_extraction", `document:${d.id}`, d.mine_id);
+    await audit(db, req.user, "retried_extraction", `document:${d.id}`, d.mine_id);
     res.json({ ok: true });
   });
   const aiLimit = rateLimit({
@@ -1166,8 +1151,8 @@ export function createApp({
         mineId: z.string().optional(),
       })
       .parse(req.body);
-    const rows = scopedRecords(req.user, mineId, { limit: 500 }),
-      mines = scopedMines(req.user, mineId),
+    const rows = await scopedRecords(req.user, mineId, { limit: 500 }),
+      mines = await scopedMines(req.user, mineId),
       ids = new Set(mines.map((m) => m.id));
     const docs = ids.size
       ? db
@@ -1215,8 +1200,8 @@ export function createApp({
       .object({ mineId: z.string().optional() })
       .parse(req.body).mineId;
     const signals = insights(
-      scopedRecords(req.user, filter),
-      scopedMines(req.user, filter),
+      await scopedRecords(req.user, filter),
+      await scopedMines(req.user, filter),
     );
     requireAiCapacity();
     inFlightAi += 1;
@@ -1244,12 +1229,12 @@ export function createApp({
     );
     res.json(response);
   });
-  app.get("/api/reports/:format", (req, res) => {
+  app.get("/api/reports/:format", async (req, res) => {
     if (!["csv", "pdf"].includes(req.params.format))
       throw fail(400, "Choose CSV or PDF");
     const kind = req.query.kind || "compliance";
     if (!statuses[kind]) throw fail(400, "Unknown report type");
-    let rows = scopedRecords(req.user, req.query.mine, {
+    let rows = await scopedRecords(req.user, req.query.mine, {
       kind,
       limit: EXPORT_LIMIT_MAX + 1,
     });
@@ -1271,7 +1256,7 @@ export function createApp({
         413,
         `Exports are limited to ${EXPORT_LIMIT_MAX} rows. Narrow the mine, date or type filters.`,
       );
-    const mines = scopedMines(req.user, req.query.mine);
+    const mines = await scopedMines(req.user, req.query.mine);
     const mineName = (id) => mines.find((m) => m.id === id)?.name || id;
     audit(
       db,
@@ -1353,12 +1338,12 @@ export function createApp({
       pdf.end();
     }
   });
-  app.use("/api", (req, res) =>
+  app.use("/api", async (req, res) =>
     res.status(404).json({ error: "API endpoint not found" }),
   );
   if (fs.existsSync(path.resolve("dist/index.html"))) {
     app.use(express.static(path.resolve("dist")));
-    app.get("/{*splat}", (req, res) =>
+    app.get("/{*splat}", async (req, res) =>
       res.sendFile(path.resolve("dist/index.html")),
     );
   }

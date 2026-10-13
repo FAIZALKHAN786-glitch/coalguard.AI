@@ -35,7 +35,7 @@ const TARGETS = {
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "coalguard-load-"));
 const database = path.join(dir, "load.sqlite");
-const { app, db } = createApp({ database, demo: true, uploads: path.join(dir, "uploads") });
+const { app, db } = await createApp({ database, demo: true, uploads: path.join(dir, "uploads") });
 
 // ---- synthetic dataset -----------------------------------------------------
 const mines = db.prepare("SELECT id FROM mines").all().map((m) => m.id);

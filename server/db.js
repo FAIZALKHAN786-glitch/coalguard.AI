@@ -3,10 +3,6 @@ import { randomUUID, createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-// Versioned migrations. Each entry runs once, in order, inside a transaction,
-// and advances PRAGMA user_version. Migrations must never destroy user data:
-// they only add tables, columns or indexes. A database created by an older
-// release is upgraded in place without losing records.
 const MIGRATIONS = [
   {
     version: 1,
@@ -73,10 +69,6 @@ export function openDatabase(filename) {
 export const uuid = () => randomUUID();
 export const now = () => new Date().toISOString();
 
-// Insert an audit entry and advance the anchored head atomically. A SAVEPOINT
-// nests correctly inside a caller's transaction and starts one when called
-// standalone, so a mutation and its audit entry (and the anchor) always commit
-// or roll back together.
 export function audit(db, user, action, entity, mineId, payload = {}) {
   db.exec("SAVEPOINT coalguard_audit");
   try {
@@ -97,9 +89,6 @@ export function audit(db, user, action, entity, mineId, payload = {}) {
     db.prepare(
       "INSERT INTO audit(actor,actor_name,action,entity,mine_id,payload,created_at,previous_hash,hash) VALUES(?,?,?,?,?,?,?,?,?)",
     ).run(...Object.values(entry), hash);
-    // Advance the anchored head by one rather than counting the table, so an
-    // audit write stays O(1) as the log grows. A row inserted into `audit`
-    // outside this function therefore makes verification report a mismatch.
     const entries =
       (db.prepare("SELECT entries FROM audit_anchor WHERE id=1").get()?.entries ??
         0) + 1;
@@ -115,11 +104,6 @@ export function audit(db, user, action, entity, mineId, payload = {}) {
   }
 }
 
-// Tamper-evidence, not immutability: the chain proves that no stored entry was
-// altered, reordered or removed from the middle, and the anchor proves the log
-// was not truncated at the end. An operator who can write to this database file
-// could still rewrite the whole chain and the anchor together; only an external
-// write-once anchor or signed export closes that gap.
 export function verifyAudit(db) {
   let prev = "GENESIS";
   let count = 0;
@@ -180,4 +164,8 @@ export function record(row) {
     createdBy: created_by,
     data: JSON.parse(data),
   };
+}
+
+export function closeDatabase(db) {
+  if (db && typeof db.close === "function") db.close();
 }
