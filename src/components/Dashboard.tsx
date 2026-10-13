@@ -25,6 +25,12 @@ import {
   Sparkles,
   MapPin,
   Activity,
+  Clock,
+  AlertTriangle,
+  CheckCircle2,
+  XCircle,
+  TrendingUp,
+  TrendingDown,
 } from "lucide-react";
 import { useData, fmt, dateLabel, navigate, canWrite } from "../lib";
 import {
@@ -153,40 +159,43 @@ export function Dashboard({
   return (
     <div className="dashboard-page">
       <PageHeading
-        eyebrow="YOUR WORKSPACE, AT A GLANCE"
-        title="Governance overview"
-        description="A connected view of your mines. Confidence in every decision."
+        eyebrow="EXECUTIVE GOVERNANCE DASHBOARD"
+        title="Decision-ready oversight"
+        description="What requires attention, what is on track, and what has changed."
       >
-        <button
-          className="button secondary"
-          onClick={() => navigate("reports")}
-        >
-          <CalendarDays size={16} /> Generate report
-        </button>
-        {canWrite(user, "inspection") && (
+        <div className="heading-actions">
           <button
-            className="button primary"
-            onClick={() => onCreate("inspection")}
+            className="button secondary"
+            onClick={() => navigate("reports")}
           >
-            <Plus size={17} /> New inspection
+            <CalendarDays size={16} /> Generate report
           </button>
-        )}
+          {canWrite(user, "inspection") && (
+            <button
+              className="button primary"
+              onClick={() => onCreate("inspection")}
+            >
+              <Plus size={17} /> New inspection
+            </button>
+          )}
+        </div>
       </PageHeading>
       <div className="welcome-grid">
         <section className="welcome-card">
           <div className="welcome-text">
             <div className="eyebrow">
-              <span className="tiny-dot" /> BUILT FOR A SAFER TOMORROW
+              <span className="tiny-dot" /> INDIAN COAL MINING GOVERNANCE
             </div>
             <h2>
-              Good governance.
+              One platform.
               <br />
-              From the ground up.
+              Every mine. Every decision.
             </h2>
             <p>
-              Less paperwork. More perspective.
+              From compliance to environment, inspections to grievances —
+              connect your governance workflow.
               <br />
-              Keep every mine moving in the right direction.
+              Evidence-based. Accountable. Ready for review.
             </p>
             <button
               className="hero-link"
@@ -520,8 +529,8 @@ export function Dashboard({
         </section>
         <section className="panel attention-panel">
           <SectionHeader
-            title="On your radar"
-            subtitle="Small actions. Meaningful impact."
+            title="What needs your attention"
+            subtitle="Priority signals for immediate action"
           />
           <div className="radar-tabs">
             <span className="active">
@@ -569,9 +578,9 @@ export function Dashboard({
       </div>
       <section className="panel schedule-panel">
         <SectionHeader
-          title="Next on the ground"
-          subtitle="Your upcoming and in-progress inspections"
-          action="Inspection calendar"
+          title="Upcoming inspections"
+          subtitle="Scheduled and in-progress observations"
+          action="View all inspections"
           onAction={() => navigate("inspection")}
         />
         <div className="schedule-list">
@@ -610,7 +619,7 @@ export function Dashboard({
       </section>
       <div className="workspace-footer">
         <span>
-          <ShieldCheck size={13} /> Better governance. Safer mines. Together.
+          <ShieldCheck size={13} /> CoalGuard AI · Connected governance for Indian coal mining
         </span>
         <span>
           Last synced{" "}

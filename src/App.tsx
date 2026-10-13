@@ -63,6 +63,7 @@ import { Mines } from "./components/Mines";
 import { Intelligence } from "./components/Intelligence";
 import { Documents } from "./components/Documents";
 import { Reports, Audit } from "./components/Reports";
+import { GIS } from "./components/GIS";
 import { Settings, MineForm } from "./components/Settings";
 const navigation = [
   { id: "dashboard", name: "Executive overview", icon: LayoutDashboard },
@@ -470,6 +471,8 @@ function Workspace({
         onAdd={() => setNewMine(true)}
       />
     );
+  else if (route === "gis")
+    content = <GIS />;
   else if (route === "intelligence")
     content = <Intelligence key={mine} mine={mine} />;
   else if (route === "documents")

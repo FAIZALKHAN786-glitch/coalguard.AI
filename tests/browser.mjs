@@ -62,7 +62,7 @@ page.on("pageerror", (e) => errors.push(e.message));
 try {
   await page.goto(url);
   await expect(
-    page.getByRole("heading", { name: "Governance overview" }),
+    page.getByRole("heading", { name: "Decision-ready oversight" }),
   ).toBeVisible();
   await page.evaluate(() => navigator.serviceWorker.ready);
   await page.evaluate(() => document.fonts.ready);
@@ -315,7 +315,7 @@ try {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(url + "/#dashboard");
   await expect(
-    page.getByRole("heading", { name: "Governance overview" }),
+    page.getByRole("heading", { name: "Decision-ready oversight" }),
   ).toBeVisible();
   assert.ok(
     await page.evaluate(
