@@ -25,8 +25,8 @@ before(() => {
 });
 after(() => fs.rmSync(dir, { recursive: true, force: true }));
 
-const boot = (name, options = {}) =>
-  createApp({
+const boot = async (name, options = {}) =>
+  await createApp({
     database: path.join(dir, `${name}.sqlite`),
     uploads: path.join(dir, `${name}-uploads`),
     ...options,
@@ -97,26 +97,32 @@ test("a fresh production deployment starts, reports ready, and refuses demo acce
   }
 });
 
-test("production fails closed when mandatory configuration is missing", () => {
+test("production fails closed when mandatory configuration is missing", async () => {
   const password = process.env.ADMIN_PASSWORD;
   const email = process.env.ADMIN_EMAIL;
   delete process.env.ADMIN_PASSWORD;
-  assert.throws(() => boot("missing-password"), /ADMIN_PASSWORD/);
+  await assert.rejects(async () => await boot("missing-password"), /ADMIN_PASSWORD/);
   process.env.ADMIN_PASSWORD = "short";
-  assert.throws(() => boot("short-password"), /ADMIN_PASSWORD/);
-  process.env.ADMIN_PASSWORD = password;
+  try {
+    await assert.rejects(async () => await boot("short-password"), /ADMIN_PASSWORD/);
+  } finally {
+    process.env.ADMIN_PASSWORD = password;
+  }
   process.env.ADMIN_EMAIL = "not-an-email";
-  assert.throws(() => boot("bad-email"), /ADMIN_EMAIL/);
-  process.env.ADMIN_EMAIL = email;
+  try {
+    await assert.rejects(async () => await boot("bad-email"), /ADMIN_EMAIL/);
+  } finally {
+    process.env.ADMIN_EMAIL = email;
+  }
 });
 
-test("an HTTPS origin without secure cookies is refused", () => {
+test("an HTTPS origin without secure cookies is refused", async () => {
   const origin = process.env.APP_ORIGIN;
   process.env.APP_ORIGIN = "https://coalguard.example.in";
-  assert.throws(() => boot("insecure-cookie"), /COOKIE_SECURE/);
+  await assert.rejects(async () => await boot("insecure-cookie"), /COOKIE_SECURE/);
   delete process.env.APP_ORIGIN;
   process.env.COOKIE_SECURE = "true";
-  const secure = boot("secure-cookie", {
+  const secure = await boot("secure-cookie", {
     publicOrigin: "https://coalguard.example.in",
   });
   // Assigning undefined to process.env would store the string "undefined".
@@ -126,23 +132,35 @@ test("an HTTPS origin without secure cookies is refused", () => {
   secure.db.close();
 });
 
-test("an existing demonstration database is refused in production", () => {
+test("an existing demonstration database is refused in production", async () => {
   const database = path.join(dir, "demo-source.sqlite");
-  const demoInstance = createApp({ database, demo: true });
+  const demoInstance = await createApp({ database, demo: true });
   demoInstance.db.close();
-  assert.throws(
-    () => createApp({ database, demo: false }),
+  await assert.rejects(
+    async () => await createApp({ database, demo: false }),
     /demonstration database/,
   );
 });
 
-test("demo mode cannot be entered by omitting configuration", () => {
+test("demo mode cannot be entered by omitting configuration", async () => {
   // DEMO_MODE unset with NODE_ENV=production must resolve to production.
   const demo = process.env.DEMO_MODE;
   delete process.env.DEMO_MODE;
-  const instance = createApp({
+  const instance = await createApp({
     database: path.join(dir, "implicit-production.sqlite"),
   });
+  try {
+    assert.equal(instance.db.prepare("SELECT count(*) n FROM users").get().n, 1);
+    assert.equal(
+      instance.db.prepare("SELECT count(*) n FROM mines").get().n,
+      0,
+      "no demonstration content may be seeded implicitly",
+    );
+    process.env.DEMO_MODE = demo;
+  } finally {
+    instance.db.close();
+  }
+});
   try {
     assert.equal(instance.db.prepare("SELECT count(*) n FROM users").get().n, 1);
     assert.equal(
@@ -156,15 +174,15 @@ test("demo mode cannot be entered by omitting configuration", () => {
   }
 });
 
-test("the embedded-preview cookie mode is refused outside demo mode", () => {
-  assert.throws(
-    () => boot("preview-in-production", { embeddedPreview: true }),
+test("the embedded-preview cookie mode is refused outside demo mode", async () => {
+  await assert.rejects(
+    async () => await boot("preview-in-production", { embeddedPreview: true }),
     /restricted to demonstration/,
   );
 });
 
 test("production rejects writes without a session and unknown API paths", async () => {
-  const instance = boot("access-control");
+  const instance = await boot("access-control");
   try {
     await request(instance.app).post("/api/records/action").send({}).expect(401);
     await request(instance.app).get("/api/dashboard").expect(401);

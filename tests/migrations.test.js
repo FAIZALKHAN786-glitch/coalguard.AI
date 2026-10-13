@@ -215,11 +215,11 @@ test("a pilot database from the previous release upgrades in place", () => {
   }
 });
 
-test("the application boots on an upgraded legacy database twice without side effects", () => {
+test("the application boots on an upgraded legacy database twice without side effects", async () => {
   const file = path.join(dir, "legacy-boot.sqlite");
   legacyDatabase(file);
   for (let pass = 0; pass < 2; pass++) {
-    const instance = createApp({
+    const instance = await createApp({
       database: file,
       demo: true,
       uploads: path.join(dir, `legacy-uploads-${pass}`),
@@ -355,7 +355,7 @@ test("migration leaves no anchor when the legacy audit chain is broken", () => {
 test("backup and restore returns both database rows and private uploads", async () => {
   const uploads = path.join(dir, "live-uploads");
   const database = path.join(dir, "live.sqlite");
-  const instance = createApp({ database, demo: true, uploads });
+  const instance = await createApp({ database, demo: true, uploads });
   const body = Buffer.from("Backup round-trip evidence: haul road drainage.");
   try {
     const { app, db } = instance;
@@ -379,7 +379,7 @@ test("backup and restore returns both database rows and private uploads", async 
     const restoredUploads = path.join(dir, "restored-uploads");
     fs.cpSync(uploads, restoredUploads, { recursive: true });
 
-    const restored = createApp({
+    const restored = await createApp({
       database: snapshot,
       demo: true,
       uploads: restoredUploads,

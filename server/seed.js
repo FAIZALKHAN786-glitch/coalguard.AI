@@ -1,9 +1,9 @@
 import bcrypt from "bcryptjs";
-import { uuid, now, audit, transaction } from "./db.js";
+import { uuid, now, audit, transaction } from "./db-adapter.js";
 const day = (n) =>
   new Date(Date.now() + n * 86400000).toISOString().slice(0, 10);
-export function seed(db, demo) {
-  if (db.prepare("SELECT count(*) n FROM users").get().n) return;
+export async function seed(db, demo) {
+  if ((await db.prepare("SELECT count(*) n FROM users").get())?.n) return;
   if (!demo) {
     if (
       !process.env.ADMIN_PASSWORD ||
@@ -23,7 +23,7 @@ export function seed(db, demo) {
         "Set ADMIN_EMAIL to a valid address before starting with DEMO_MODE=false.",
       );
   }
-  transaction(db, () => {
+  await transaction(db, async () => {
     const users = demo
       ? [
           [
@@ -70,7 +70,7 @@ export function seed(db, demo) {
           ],
         ];
     for (const [id, name, email, password, role, mines] of users)
-      db.prepare("INSERT INTO users VALUES(?,?,?,?,?,?)").run(
+      await db.prepare("INSERT INTO users VALUES(?,?,?,?,?,?)").run(
         id,
         name,
         email,
@@ -136,11 +136,11 @@ export function seed(db, demo) {
       ],
     ];
     for (const m of mines)
-      db.prepare("INSERT INTO mines VALUES(?,?,?,?,?,?,?)").run(...m);
+      await db.prepare("INSERT INTO mines VALUES(?,?,?,?,?,?,?)").run(...m);
     const insert = db.prepare(
       "INSERT INTO records(id,kind,mine_id,title,category,status,priority,due_date,owner,notes,data,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
     );
-    function add(
+    async function add(
       kind,
       mine,
       title,
@@ -153,7 +153,7 @@ export function seed(db, demo) {
       notes = "",
     ) {
       const id = uuid();
-      insert.run(
+      await insert.run(
         id,
         kind,
         mine,
@@ -423,16 +423,9 @@ export function seed(db, demo) {
         "Ravi Kumar",
         { workerId: `DEMO-W${101 + i}`, shift: "Morning", contractorId: "" },
       );
-    audit(
-      db,
-      { id: "u-admin", name: "Aarav Sharma" },
-      "initialized",
-      "workspace",
-      null,
-      {
-        mode: "demonstration",
-        message: "Fictional records created for workflow evaluation.",
-      },
-    );
+    await audit(db, { id: "u-admin", name: "Aarav Sharma" }, "initialized", "workspace", null, {
+      mode: "demonstration",
+      message: "Fictional records created for workflow evaluation.",
+    });
   });
 }

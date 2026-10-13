@@ -13,7 +13,7 @@ test("Helmet allows the OSM tile host and sends the required referrer policy", a
   process.env.NODE_ENV = "production";
 
   try {
-    const instance = createApp({
+    const instance = await createApp({
       database: path.join(directory, "test.sqlite"),
       uploads: path.join(directory, "uploads"),
       demo: true,

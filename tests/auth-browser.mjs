@@ -56,7 +56,7 @@ if (
       "to a valid fonts.conf. Headless Chromium can crash while rendering text without one.",
   );
 
-const { app, db } = createApp({
+const { app, db } = await createApp({
   database: path.join(dir, "db.sqlite"),
   demo: true,
   embeddedPreview: true,
